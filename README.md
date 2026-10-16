@@ -6,26 +6,48 @@ Sparkiee aims to bring animated desktop companions, expressive emotes, a local c
 
 ## Project status
 
-Phase 0 (architecture and compatibility research) is complete. Phase 1 is in progress.
+Phase 0 architecture research is documented. **Phase 1 runtime foundation is implemented and locally tested.** See [STATUS.md](STATUS.md) for what is real today and what remains planned.
 
 - [Architecture](ARCHITECTURE.md)
 - [Status and next steps](STATUS.md)
 - [Architecture decision records](docs/adr/README.md)
 
-The first milestone is a workspace scaffold, CLI, local daemon/API stub, and automated lifecycle tests. Desktop rendering and character animations are later milestones; they are not implemented yet.
+The current milestone includes a workspace scaffold, CLI, local daemon/API, and a static dashboard at `http://127.0.0.1:2005`. Desktop pet rendering, character animation, WebSocket control, and OpenCode integration are future phases.
 
-## Planned usage
+## CLI
 
-After local development and packaging are complete:
+The intended public install flow, once published:
 
 ```bash
 npm install -g sparkiee
 sparkiee
 ```
 
-Dashboard: http://127.0.0.1:2005
+Available commands in the current source tree:
 
-For development, the intended workflow is to use `pnpm` and `pnpm link --global` or `npm link` once the CLI package is runnable. Exact commands will be documented after the first implementation.
+```bash
+sparkiee            # start the runtime (default command)
+sparkiee start      # start the local runtime and dashboard
+sparkiee status     # report runtime state
+sparkiee stop       # authenticated graceful shutdown
+sparkiee --help
+sparkiee --version
+```
+
+The runtime binds to `127.0.0.1` on port `2005` by default. Override with `SPARKIEE_PORT`. Runtime state and its private token live under `$XDG_STATE_HOME/sparkiee` or `~/.local/state/sparkiee`; `SPARKIEE_HOME` can override that path.
+
+## Development
+
+Requirements: Node.js 22 or later. The Phase 1 runtime uses Node.js built-ins; no runtime dependency installation is needed.
+
+```bash
+npm run check
+npm test
+npm link
+sparkiee --help
+```
+
+The npm tarball has been smoke-tested in a temporary installation prefix. Before publishing or using globally on the target machine, run the checks on Fedora GNOME/Wayland as well.
 
 ## Design principles
 
@@ -40,6 +62,9 @@ For development, the intended workflow is to use `pnpm` and `pnpm link --global`
 
 Fedora Linux with GNOME on Wayland, using an XWayland-backed Electron pet host for the window-management capabilities identified in the Phase 0 investigation. Known limitations are documented in the architecture report.
 
-## Development
+## Important limitations
 
-See the workspace package READMEs and `STATUS.md` for current implementation progress. Do not treat planned features as released functionality.
+- The current dashboard shows runtime state and a roadmap placeholder; it does not control desktop pets yet.
+- No desktop pet renderer, sound system, or character packs are implemented yet.
+- The OpenCode adapter is not implemented yet.
+- The npm package is not published. Re-check package-name availability before release.
