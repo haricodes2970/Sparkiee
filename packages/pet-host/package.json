@@ -1,0 +1,7 @@
+{
+  "name": "@sparkiee/pet-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reserved for the future Electron pet window host"
+}

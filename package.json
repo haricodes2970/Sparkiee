@@ -1,0 +1,39 @@
+{
+  "name": "sparkiee",
+  "version": "0.1.0",
+  "description": "An extensible local-first desktop pet framework for developers",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "sparkiee": "bin/sparkiee.mjs"
+  },
+  "files": [
+    "bin/",
+    "packages/core/",
+    "packages/server/",
+    "packages/dashboard/",
+    "packages/cli/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "pnpm@11.20.0",
+  "scripts": {
+    "test": "node --test",
+    "test:unit": "node --test tests/core.test.mjs tests/server.test.mjs",
+    "test:integration": "node --test tests/integration/*.test.mjs",
+    "check": "node --check bin/sparkiee.mjs && node --check packages/core/src/index.mjs && node --check packages/server/src/server.mjs && node --check packages/server/src/daemon.mjs && node --check packages/dashboard/src/main.js"
+  },
+  "keywords": [
+    "desktop-pet",
+    "opencode",
+    "developer-tools",
+    "pixel-art",
+    "pet-framework"
+  ],
+  "workspaces": [
+    "packages/*"
+  ]
+}

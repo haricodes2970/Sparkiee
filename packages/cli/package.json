@@ -1,0 +1,7 @@
+{
+  "name": "@sparkiee/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Development package placeholder; the public bin is owned by the root package"
+}

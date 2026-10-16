@@ -1,0 +1,7 @@
+{
+  "name": "@sparkiee/plugin-opencode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reserved for the future OpenCode observer plugin"
+}
