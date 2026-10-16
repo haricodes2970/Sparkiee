@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#11131b" />
+    <title>Sparkiee — Pet Control Centre</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="Sparkiee home">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span><strong>sparkiee</strong><small>DESKTOP COMPANIONS</small></span>
+        </a>
+        <div class="sidebar-label">WORKSPACE</div>
+        <nav class="nav-list" aria-label="Main navigation">
+          <a class="nav-item active" href="#overview" aria-current="page"><span class="nav-icon">◫</span> Overview <span class="nav-arrow">↗</span></a>
+          <a class="nav-item muted" href="#pets" aria-disabled="true"><span class="nav-icon">✦</span> My pets <span class="soon">SOON</span></a>
+          <a class="nav-item muted" href="#activity" aria-disabled="true"><span class="nav-icon">◷</span> Activity <span class="soon">SOON</span></a>
+          <a class="nav-item muted" href="#characters" aria-disabled="true"><span class="nav-icon">▦</span> Character library <span class="soon">SOON</span></a>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="mini-card">
+            <div class="mini-orb">✧</div>
+            <strong>Your desktop, more alive.</strong>
+            <p>One little companion at a time. More characters are on the way.</p>
+          </div>
+          <div class="version"><span class="version-dot"></span> Phase 1 · Runtime foundation <span>v0.1.0</span></div>
+        </div>
+      </aside>
+
+      <main id="overview" class="main-content">
+        <header class="topbar">
+          <div class="breadcrumb">Workspace <span>/</span> <strong>Overview</strong></div>
+          <div class="topbar-right"><span class="local-pill"><span class="pulse-dot"></span> Running locally</span><span class="avatar">S</span></div>
+        </header>
+
+        <section class="welcome-row">
+          <div>
+            <div class="eyebrow">YOUR LITTLE CORNER OF THE DESKTOP</div>
+            <h1>Make room for a little <span>spark.</span></h1>
+            <p class="subtitle">Meet your future companions, customise their vibe, and let them keep an eye on your coding sessions.</p>
+          </div>
+          <div class="welcome-decoration" aria-hidden="true"><span class="star star-one">✦</span><span class="star star-two">✧</span><div class="sun-orb"><span>✦</span></div><span class="orbit orbit-one"></span><span class="orbit orbit-two"></span></div>
+        </section>
+
+        <section class="section-heading">
+          <div><h2>Runtime overview</h2><p>The Sparkiee engine running on this machine.</p></div>
+          <span id="connection-pill" class="status-pill checking"><span class="status-dot"></span><span id="connection-text">Checking runtime…</span></span>
+        </section>
+
+        <section class="stats-grid" aria-label="Runtime status">
+          <article class="stat-card"><div class="stat-top"><span class="stat-label">RUNTIME</span><span class="stat-icon purple">⌘</span></div><div id="runtime-state" class="stat-value">Checking…</div><div id="runtime-caption" class="stat-caption">Connecting to local service</div></article>
+          <article class="stat-card"><div class="stat-top"><span class="stat-label">DASHBOARD</span><span class="stat-icon blue">↗</span></div><div class="stat-value">Port <span id="runtime-port">2005</span></div><div class="stat-caption">Bound to 127.0.0.1 only</div></article>
+          <article class="stat-card"><div class="stat-top"><span class="stat-label">DESKTOP PETS</span><span class="stat-icon amber">✦</span></div><div class="stat-value">Coming soon</div><div class="stat-caption">Pet renderer is the next milestone</div></article>
+          <article class="stat-card"><div class="stat-top"><span class="stat-label">INTEGRATIONS</span><span class="stat-icon mint">⌁</span></div><div class="stat-value">Not connected</div><div class="stat-caption">OpenCode adapter is planned</div></article>
+        </section>
+
+        <section class="content-grid">
+          <article class="panel pet-panel">
+            <div class="panel-heading"><div><div class="eyebrow">CHARACTER SPOTLIGHT</div><h2>Your first companion is on its way</h2></div><span class="coming-tag">IN DEVELOPMENT</span></div>
+            <div class="empty-character">
+              <div class="character-stage"><span class="stage-star stage-star-a">✦</span><span class="stage-star stage-star-b">✧</span><div class="character-placeholder"><span class="character-face">◡</span><span class="character-eye eye-left"></span><span class="character-eye eye-right"></span><span class="character-cheek cheek-left"></span><span class="character-cheek cheek-right"></span><span class="character-foot foot-left"></span><span class="character-foot foot-right"></span></div><div class="stage-shadow"></div><span class="stage-spark spark-a">✦</span><span class="stage-spark spark-b">·</span></div>
+              <div class="empty-copy"><h3>A home for every personality.</h3><p>Sparkiee is being built for expressive pixel companions that run, nap, dance, and celebrate when your code finally works.</p><div class="feature-chips"><span>Pixel animations</span><span>Custom emotes</span><span>Multiple characters</span></div></div>
+            </div>
+            <div class="panel-footer"><span><span class="footer-dot"></span> Character engine · planned</span><button class="text-button" type="button" disabled title="Available in a future phase">Explore characters <span>→</span></button></div>
+          </article>
+
+          <article class="panel quick-panel">
+            <div class="panel-heading"><div><div class="eyebrow">QUICK START</div><h2>Start exploring</h2></div><span class="quick-bolt">ϟ</span></div>
+            <p class="quick-intro">Sparkiee runs locally. No account, cloud service, or external connection is needed for the runtime.</p>
+            <div class="quick-step"><span class="step-number">01</span><div><strong>Check runtime status</strong><p>Use the CLI to see whether Sparkiee is running.</p><code>sparkiee status</code></div><span class="step-check">✓</span></div>
+            <div class="quick-step"><span class="step-number">02</span><div><strong>Control the engine</strong><p>Start or stop the local service whenever you need.</p><code>sparkiee start</code></div><span class="step-check">✓</span></div>
+            <div class="quick-step"><span class="step-number">03</span><div><strong>Bring in a companion</strong><p>Desktop pets and character packs arrive in a later phase.</p><span class="inline-soon">ON THE ROADMAP</span></div><span class="step-check future">✦</span></div>
+          </article>
+        </section>
+
+        <footer class="page-footer"><span>Made for the moments between <strong>run</strong> and <strong>done.</strong></span><span id="last-checked">Runtime status has not been checked yet.</span></footer>
+      </main>
+    </div>
+    <div id="live-region" class="sr-only" aria-live="polite"></div>
+  </body>
+</html>
