@@ -24,7 +24,7 @@
     "test": "node --test",
     "test:unit": "node --test tests/core.test.mjs tests/server.test.mjs",
     "test:integration": "node --test tests/integration/*.test.mjs",
-    "check": "node --check bin/sparkiee.mjs && node --check packages/core/src/index.mjs && node --check packages/server/src/server.mjs && node --check packages/server/src/daemon.mjs && node --check packages/dashboard/src/main.js"
+    "check": "node --check bin/sparkiee.mjs && node --check packages/cli/src/commands.mjs && node --check packages/core/src/index.mjs && node --check packages/server/src/server.mjs && node --check packages/server/src/daemon.mjs && node --check packages/dashboard/src/main.js"
   },
   "keywords": [
     "desktop-pet",
