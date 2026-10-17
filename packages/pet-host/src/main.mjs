@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createMovementController } from './movement.mjs';
 
 const APP_DIR = fileURLToPath(new URL('../', import.meta.url));
 const PET_PAGE = path.join(APP_DIR, 'renderer', 'index.html');
@@ -14,6 +15,7 @@ let pollTimer;
 let lastState = '';
 let latestState = null;
 let dragOrigin = null;
+let movement;
 
 if (process.platform === 'linux' && process.env.SPARKIEE_OZONE_PLATFORM !== 'wayland') {
   // Phase 0 selected XWayland for GNOME because the pet needs window positioning.
@@ -42,6 +44,25 @@ async function requestApi(route, options = {}) {
   return payload;
 }
 
+function reactToMovement(state) {
+  if (!movement) return;
+  if (!state || state.visible === false) {
+    movement.stop();
+    return;
+  }
+  const animation = state.animation;
+  if (animation === 'walk' || animation === 'run') {
+    movement.start(animation);
+    return;
+  }
+  // Idle roams gently when the user has autonomous movement enabled.
+  if (animation === 'idle' && state.settings?.autoRoam !== false) {
+    movement.start('walk');
+    return;
+  }
+  movement.stop();
+}
+
 function publishState(state) {
   latestState = state;
   const serialised = JSON.stringify(state);
@@ -52,6 +73,7 @@ function publishState(state) {
     if (state.visible && !petWindow.isVisible()) petWindow.showInactive();
     if (!state.visible && petWindow.isVisible()) petWindow.hide();
   }
+  reactToMovement(state);
 }
 
 async function pollState() {
@@ -142,13 +164,18 @@ ipcMain.on('pet:drag-start', (event, point) => {
   if (!isPointerPoint(point) || !petWindow || event.sender !== petWindow.webContents) return;
   const [windowX, windowY] = petWindow.getPosition();
   dragOrigin = { pointerX: point.screenX, pointerY: point.screenY, windowX, windowY };
+  // Autonomous roaming must not fight the user while they drag.
+  movement?.pause();
 });
 ipcMain.on('pet:drag-move', (event, point) => {
   if (!petWindow || event.sender !== petWindow.webContents) return;
   movePetFromPointer(point);
 });
 ipcMain.on('pet:drag-end', (event) => {
-  if (petWindow && event.sender === petWindow.webContents) dragOrigin = null;
+  if (petWindow && event.sender === petWindow.webContents) {
+    dragOrigin = null;
+    movement?.resume();
+  }
 });
 
 app.whenReady().then(async () => {
@@ -157,6 +184,12 @@ app.whenReady().then(async () => {
     return;
   }
   petWindow = createPetWindow();
+  movement = createMovementController({
+    getBounds: () => petWindow.getBounds(),
+    getWorkArea: () => screen.getDisplayMatching(petWindow.getBounds()).workArea,
+    setPosition: (x, y) => petWindow.setPosition(Math.round(x), Math.round(y), false),
+    speedScale: () => latestState?.settings?.moveSpeed ?? 1,
+  });
   await pollState();
   pollTimer = setInterval(() => void pollState(), POLL_MS);
   app.on('activate', () => {
@@ -166,6 +199,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   if (pollTimer) clearInterval(pollTimer);
+  movement?.stop();
   ipcMain.removeHandler('pet:command');
   ipcMain.removeHandler('pet:get-state');
   ipcMain.removeAllListeners('pet:drag-start');

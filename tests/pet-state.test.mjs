@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createPetController, isValidPetCommandPayload, PET_COMMANDS } from '../packages/core/src/pet-state.mjs';
+import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayload, PET_COMMANDS } from '../packages/core/src/pet-state.mjs';
 
 test('new pet controller begins visible and idle without a connected host', () => {
   let time = 1000;
@@ -59,4 +59,34 @@ test('command payloads accept only a single supported command field', () => {
   assert.equal(isValidPetCommandPayload({ command: 'dance', args: 'bad' }), false);
   assert.equal(isValidPetCommandPayload(null), false);
   assert.equal(isValidPetCommandPayload(['dance']), false);
+});
+
+test('pet settings default to speed 1 with autonomous roaming enabled', () => {
+  const pet = createPetController();
+  assert.deepEqual(pet.snapshot().settings, { moveSpeed: 1, autoRoam: true });
+});
+
+test('pet settings accept validated updates and reject out-of-range values', () => {
+  const pet = createPetController();
+  const updated = pet.updateSettings({ moveSpeed: 2.5, autoRoam: false });
+  assert.deepEqual(updated.settings, { moveSpeed: 2.5, autoRoam: false });
+
+  assert.throws(() => pet.updateSettings({ moveSpeed: 0 }), /moveSpeed must be a number/);
+  assert.throws(() => pet.updateSettings({ moveSpeed: 99 }), /moveSpeed must be a number/);
+  assert.throws(() => pet.updateSettings({ moveSpeed: 'fast' }), /moveSpeed must be a number/);
+  assert.throws(() => pet.updateSettings({ autoRoam: 'yes' }), /autoRoam must be a boolean/);
+  assert.deepEqual(pet.snapshot().settings, { moveSpeed: 2.5, autoRoam: false });
+});
+
+test('settings payload validation accepts partial updates and rejects unknown keys', () => {
+  assert.equal(isValidPetSettingsPayload({ moveSpeed: 1.5 }), true);
+  assert.equal(isValidPetSettingsPayload({ autoRoam: false }), true);
+  assert.equal(isValidPetSettingsPayload({ moveSpeed: 2, autoRoam: true }), true);
+  assert.equal(isValidPetSettingsPayload({}), false);
+  assert.equal(isValidPetSettingsPayload({ speed: 2 }), false);
+  assert.equal(isValidPetSettingsPayload({ moveSpeed: 0.1 }), false);
+  assert.equal(isValidPetSettingsPayload({ moveSpeed: 4 }), false);
+  assert.equal(isValidPetSettingsPayload({ autoRoam: 0 }), false);
+  assert.equal(isValidPetSettingsPayload(null), false);
+  assert.equal(isValidPetSettingsPayload([1]), false);
 });

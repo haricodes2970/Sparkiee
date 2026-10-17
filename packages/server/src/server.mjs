@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isAuthorized, toRuntimePayload, DEFAULT_HOST } from '../../core/src/index.mjs';
-import { createPetController, isValidPetCommandPayload } from '../../core/src/pet-state.mjs';
+import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayload } from '../../core/src/pet-state.mjs';
 
 const DASHBOARD_ROOT = fileURLToPath(new URL('../../dashboard/', import.meta.url));
 const STATIC_FILES = new Map([
@@ -153,6 +153,25 @@ export function createSparkieeServer({
         return;
       }
       sendJson(response, 200, { ok: true, pet: petController.command(payload.command) });
+      return;
+    }
+    if (method === 'PUT' && pathname === '/api/v1/pet/settings') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!isValidPetSettingsPayload(payload)) {
+        sendJson(response, 400, { error: `Invalid pet settings payload. Accepted keys: moveSpeed (${0.25}–${3}), autoRoam (boolean).` });
+        return;
+      }
+      sendJson(response, 200, { ok: true, pet: petController.updateSettings(payload) });
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/host/restart') {

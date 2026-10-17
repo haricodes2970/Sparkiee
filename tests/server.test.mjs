@@ -220,6 +220,39 @@ test('same-origin dashboard requests are accepted on localhost as well as 127.0.
   }
 });
 
+test('pet settings endpoint validates input and applies updates', async () => {
+  const instance = await startServer();
+  try {
+    const denied = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/settings`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', origin: 'https://attacker.example' },
+      body: JSON.stringify({ moveSpeed: 2 }),
+    });
+    assert.equal(denied.status, 403);
+
+    const invalid = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/settings`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${instance.port}` },
+      body: JSON.stringify({ moveSpeed: 500 }),
+    });
+    assert.equal(invalid.status, 400);
+
+    const accepted = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/settings`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${instance.port}` },
+      body: JSON.stringify({ moveSpeed: 2, autoRoam: false }),
+    });
+    assert.equal(accepted.status, 200);
+    const payload = await accepted.json();
+    assert.deepEqual(payload.pet.settings, { moveSpeed: 2, autoRoam: false });
+
+    const state = await (await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/state`)).json();
+    assert.deepEqual(state.settings, { moveSpeed: 2, autoRoam: false });
+  } finally {
+    await close(instance.server);
+  }
+});
+
 test('unknown routes return JSON 404 without exposing stack traces', async () => {
   const instance = await startServer();
   try {

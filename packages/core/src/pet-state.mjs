@@ -37,6 +37,9 @@ const MESSAGES = Object.freeze({
   show: "I'm back! Let's make something.",
 });
 
+export const MOVE_SPEED_MIN = 0.25;
+export const MOVE_SPEED_MAX = 3;
+
 export function createPetController({ clock = () => Date.now() } = {}) {
   let state = {
     characterId: 'sparkiee-original',
@@ -47,14 +50,38 @@ export function createPetController({ clock = () => Date.now() } = {}) {
     message: MESSAGES.idle,
     updatedAt: new Date(clock()).toISOString(),
   };
+  let settings = { moveSpeed: 1, autoRoam: true };
   let lastHeartbeat = 0;
 
   return {
     snapshot() {
       return {
         ...state,
+        settings: { ...settings },
         hostConnected: lastHeartbeat > 0 && clock() - lastHeartbeat < 3500,
       };
+    },
+    updateSettings(partial) {
+      const next = { ...settings };
+      if ('moveSpeed' in partial) {
+        const speed = Number(partial.moveSpeed);
+        if (!Number.isFinite(speed) || speed < MOVE_SPEED_MIN || speed > MOVE_SPEED_MAX) {
+          const error = new Error(`moveSpeed must be a number from ${MOVE_SPEED_MIN} to ${MOVE_SPEED_MAX}.`);
+          error.code = 'INVALID_PET_SETTINGS';
+          throw error;
+        }
+        next.moveSpeed = speed;
+      }
+      if ('autoRoam' in partial) {
+        if (typeof partial.autoRoam !== 'boolean') {
+          const error = new Error('autoRoam must be a boolean.');
+          error.code = 'INVALID_PET_SETTINGS';
+          throw error;
+        }
+        next.autoRoam = partial.autoRoam;
+      }
+      settings = next;
+      return this.snapshot();
     },
     heartbeat() {
       lastHeartbeat = clock();
@@ -89,4 +116,16 @@ export function isValidPetCommandPayload(payload) {
     typeof payload.command === 'string' &&
     PET_COMMANDS.includes(payload.command)
   );
+}
+
+export function isValidPetSettingsPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const keys = Object.keys(payload);
+  if (keys.length === 0 || keys.some((key) => !['moveSpeed', 'autoRoam'].includes(key))) return false;
+  if ('moveSpeed' in payload) {
+    const speed = Number(payload.moveSpeed);
+    if (!Number.isFinite(speed) || speed < MOVE_SPEED_MIN || speed > MOVE_SPEED_MAX) return false;
+  }
+  if ('autoRoam' in payload && typeof payload.autoRoam !== 'boolean') return false;
+  return true;
 }
