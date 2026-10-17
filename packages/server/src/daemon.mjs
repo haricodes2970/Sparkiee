@@ -54,10 +54,15 @@ function launchPetHost(token) {
     // which downloads synchronously and would block the HTTP server (the bug
     // behind the "did not become ready" CLI timeout on first run).
     let electronDir;
-    try {
-      electronDir = path.dirname(require.resolve('electron/package.json'));
-    } catch {
-      electronDir = undefined;
+    if (process.env.SPARKIEE_ELECTRON_DIR) {
+      // Test/diagnostic seam: point at a specific electron package directory.
+      electronDir = process.env.SPARKIEE_ELECTRON_DIR;
+    } else {
+      try {
+        electronDir = path.dirname(require.resolve('electron/package.json'));
+      } catch {
+        electronDir = undefined;
+      }
     }
     const resolved = resolveElectronBinary({ electronDir, overrideDistPath: process.env.ELECTRON_OVERRIDE_DIST_PATH });
     if (!resolved.ok) {
@@ -65,7 +70,14 @@ function launchPetHost(token) {
       void log(`Desktop pet host unavailable: ${hostTracker.snapshot().lastError}`);
       return;
     }
-    petHost = spawn(resolved.binary, [PET_APP_DIR], {
+    // Ozone platform for the browser process must be a real CLI argument:
+    // app.commandLine.appendSwitch arrives too late and only affects renderers,
+    // leaving the browser process on Wayland where windows cannot be positioned.
+    const hostArgs = [];
+    if (process.platform === 'linux' && process.env.SPARKIEE_OZONE_PLATFORM !== 'wayland') {
+      hostArgs.push('--ozone-platform=x11');
+    }
+    petHost = spawn(resolved.binary, [...hostArgs, PET_APP_DIR], {
       cwd: PET_APP_DIR,
       env: {
         ...process.env,
