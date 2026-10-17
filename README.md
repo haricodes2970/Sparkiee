@@ -8,7 +8,9 @@ Sparkiee is a local-first desktop companion app with a character-agnostic design
 
 - Phase 0 — architecture research: documented.
 - Phase 1 — CLI, local daemon, API and dashboard: implemented.
-- Phase 2 — first desktop pet and live control API: prototype implemented; verify on Fedora GNOME/Wayland before treating window behaviour as stable.
+- Phase 2 — desktop pet: implemented and **verified on Fedora 44 / GNOME 50.3
+  (Wayland)** — a real XWayland window that roams the desktop, with dashboard
+  control of movement, emotes, and visibility.
 
 See [STATUS.md](STATUS.md), [ARCHITECTURE.md](ARCHITECTURE.md), and [Phase 2 notes](docs/PHASE_2_DESKTOP_PET.md).
 
@@ -39,13 +41,15 @@ sparkiee --help
 sparkiee --version
 ~~~
 
-The Electron dependency downloads a platform-specific desktop runtime during npm install. This initial implementation has not been published to npm; npm link exposes the local checkout as the sparkiee command.
+The Electron dependency downloads a platform-specific desktop runtime during npm install. On Linux the pet host is launched with `--ozone-platform=x11` (XWayland) because GNOME/Mutter refuses window positioning for native Wayland clients. This initial implementation has not been published to npm; npm link exposes the local checkout as the sparkiee command.
 
 ## Useful environment variables
 
 - SPARKIEE_PORT: local HTTP port (default 2005).
 - SPARKIEE_HOME: override local state directory.
 - SPARKIEE_DISABLE_PET=1: start the daemon without launching the Electron pet host (useful for headless testing).
+- SPARKIEE_START_TIMEOUT_MS: CLI startup wait budget (default 15000).
+- SPARKIEE_ELECTRON_DIR: diagnostic seam pointing at an electron package directory (used by tests to simulate a missing binary).
 - SPARKIEE_OZONE_PLATFORM=wayland: opt out of the default XWayland selection to test another backend; global positioning and always-on-top behaviour are not promised on native Wayland.
 
 ## Security principles

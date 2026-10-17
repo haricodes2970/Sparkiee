@@ -1,48 +1,66 @@
 # Project Status
 
-Updated: 2026-10-17
+Updated: 2026-10-18
 
 ## Completed
 
 - [x] Phase 0 architecture decisions recorded in three ADRs.
 - [x] Phase 1 workspace, CLI, local daemon, status API, shutdown, and dashboard.
 - [x] Runtime token with restrictive local permissions and authenticated state-changing host calls.
-- [x] Original Sparkiee starter character SVG and Electron pet window prototype.
+- [x] Original Sparkiee starter character SVG and Electron pet window.
 - [x] Pet state machine with idle, walk, run, dance, sleep, celebrate, wave, surprised, hide, and show commands.
-- [x] Local API endpoints to read pet state and trigger supported commands.
-- [x] Dashboard emote controls, show/hide controls, live host status, and session-local activity history.
-- [x] Drag interaction wired from pet pointer events to native XWayland window movement.
-- [x] API request size limit and strict pet-command payload validation.
-- [x] GitHub Actions syntax check and test suite passed on commit e74fbc13eb129cbf103f25be7b36013b0a15b72c before the most recent drag refinement.
+- [x] **Startup failure diagnosed and fixed**: `require('electron')` blocked the
+      daemon event loop with a synchronous binary download, making the CLI time
+      out while the daemon was actually healthy. The binary is now resolved
+      without side effects (core/electron-resolver) and failures are actionable.
+- [x] **Pet-host status is honest**: real lifecycle phases (idle/launching/
+      running/exited/failed/disabled/unavailable) reported through
+      /api/v1/runtime, `sparkiee status`, and the dashboard, with pid liveness.
+- [x] **XWayland fix**: the Ozone platform is now a real CLI argument; before
+      this, only renderers ran X11 while the browser process stayed on Wayland,
+      so the window could not be positioned or seen by X tools.
+- [x] **Native desktop roaming**: walk/run move the actual BrowserWindow with
+      time-based interpolation, dwell pauses, work-area clamping, drag-pause,
+      configurable speed (0.25–3x), and optional idle auto-roam.
+- [x] Dashboard control centre: emote vs movement controls, speed slider,
+      auto-roam toggle, summon/hide, honest host card with Retry launch,
+      labelled preview, activity log including host events.
+- [x] Pet-host supervision: up to 3 automatic restarts with backoff plus a
+      manual restart endpoint (/api/v1/host/restart).
+- [x] CLI hardening: 15s adaptive wait, alive-aware timeout errors, stale-pid
+      guard, duplicate-daemon protection, host phase in start/status output.
+- [x] 50 automated tests pass (`npm run check` + `npm test`, 2026-10-18),
+      including integration tests for missing Electron, restart honesty,
+      rapid commands, hide/show, pid-file edge cases, and log token-leak checks.
 
-## Pending verification
+## Verified on Fedora 44 / GNOME 50.3 Wayland (2026-10-18)
 
-- [ ] Confirm the latest GitHub Actions run is green for the current HEAD.
-- [ ] Run npm install, npm run check, and npm test on Fedora 44 GNOME/Wayland.
-- [ ] Verify the Electron host launches and draws transparency correctly under XWayland.
-- [ ] Verify stay-on-top, non-focus-stealing startup, manual dragging, and window bounds on the user's GNOME session.
-- [ ] Verify dashboard emote buttons visibly change the desktop pet.
-- [ ] Verify Hide and Show both work when invoked from the dashboard.
-- [ ] Improve lifecycle handling if the Electron host is closed or crashes.
-- [ ] Add audio, desktop notifications, and settings persistence.
-- [ ] Add a documented character pack schema and second character.
-- [ ] Implement OpenCode event observation and task completion alerts.
-- [ ] Re-check npm name availability before publication.
+- Separate native XWayland window ("Sparkiee Pet", WM_CLASS sparkiee-pet-host).
+- `_NET_WM_STATE_ABOVE` set (stays above normal windows).
+- Walk moves the window ~60 px/s; Zoomies ~130 px/s net; auto-roam works.
+- Hide removes the window; Show restores it; stop closes it cleanly (exit 0).
+- `sparkiee start` completes in ~0.35 s and reports the pet-host phase honestly.
+
+## Pending
+
+- [ ] Manual visual checks: transparency against the real desktop, no focus
+      steal on start, drag feel (see docs/PHASE_2_DESKTOP_PET.md checklist).
+- [ ] Audio, desktop notifications, and settings persistence across restarts.
+- [ ] Documented character pack schema and second character.
+- [ ] OpenCode observer plugin: task events → celebration/error/attention emotes.
+- [ ] Publish decision: re-check npm name availability before any publication.
 
 ## Known limitations
 
-- Electron host and transparent window code are a prototype and have not been visually tested from this repository automation environment.
-- Window positioning and stay-on-top depend on XWayland and the compositor; native Wayland mode is not supported for the required controls.
-- Manual dragging is implemented, but autonomous wandering / path movement is not.
-- Multi-pet management, system tray integration, and character downloads are not implemented.
-- Activity history is session-local to the dashboard and is not persisted.
-- The pet does not yet observe OpenCode sessions; no coding task completion notifications are implemented.
-- The npm package remains unpublished.
+- One Electron process per pet; consolidation is a later optimisation.
+- Fullscreen Wayland-native windows cover the pet (GNOME stacking behaviour).
+- No global hotkeys on Wayland; the dashboard and pet window drive actions.
+- Activity history is dashboard-session-local and not persisted.
+- The pet does not yet observe OpenCode sessions.
 
 ## Next
 
-1. Pull the latest main branch on Fedora, then run npm install.
-2. Run npm run check && npm test.
-3. Start with sparkiee start and open http://127.0.0.1:2005.
-4. Verify the desktop pet appears at the screen corner and responds to emotes from both the dashboard and the pet window.
-5. Fix Fedora/Wayland window issues before extending the character system.
+1. Manual Fedora visual pass (transparency, focus, drag) from the Phase 2 checklist.
+2. Settings persistence across restarts (Phase 6 groundwork).
+3. Character-pack SDK so a second character can be added without engine edits.
+4. OpenCode observer plugin using the official plugin event API.
