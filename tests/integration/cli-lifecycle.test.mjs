@@ -41,7 +41,7 @@ function runCli(args, env, timeout = 10_000) {
 }
 
 function makeEnv(home, port) {
-  return { ...process.env, SPARKIEE_HOME: home, SPARKIEE_PORT: String(port) };
+  return { ...process.env, SPARKIEE_HOME: home, SPARKIEE_PORT: String(port), SPARKIEE_DISABLE_PET: '1' };
 }
 
 test('CLI help and version work without starting the daemon', async () => {
@@ -88,7 +88,6 @@ test('CLI starts the daemon, serves the dashboard, reports status, and stops cle
     assert.match(log, /Sparkiee ready/);
     assert.match(log, /Shutting down/);
   } finally {
-    // Best-effort cleanup if the test fails before its normal stop assertion.
     await runCli(['stop'], env).catch(() => {});
     await rm(scratch, { recursive: true, force: true });
   }

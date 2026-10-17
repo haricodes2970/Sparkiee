@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Sparkiee Pet</title>
+  <link rel="stylesheet" href="./pet.css" />
+  <script type="module" src="./pet.js"></script>
+</head>
+<body>
+  <main id="pet-root" class="pet-root animation-idle" aria-label="Sparkiee desktop pet">
+    <div class="speech-bubble" id="speech-bubble" aria-live="polite">
+      <span class="bubble-status" id="bubble-status">Hanging out</span>
+      <span class="bubble-message" id="bubble-message">Hey there, developer!</span>
+    </div>
+    <button class="pet-button" id="pet-button" type="button" aria-label="Ask Sparkiee to wave" title="Click me for a wave">
+      <img class="pet-sprite" src="./sparkiee.svg" alt="A tiny golden pixel creature with sparkly ears and a lightning-shaped tail" draggable="false" />
+      <span class="sparkle sparkle-one">✦</span>
+      <span class="sparkle sparkle-two">✧</span>
+    </button>
+    <div class="pet-footer">
+      <span class="connection-dot" id="connection-dot"></span>
+      <span id="pet-name">sparkiee</span>
+      <span class="pet-footer-spacer"></span>
+      <button class="mini-control" data-command="hide" title="Hide pet" aria-label="Hide pet">−</button>
+    </div>
+    <div class="pet-error" id="pet-error" role="status"></div>
+  </main>
+</body>
+</html>

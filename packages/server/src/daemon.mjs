@@ -1,11 +1,18 @@
+import { spawn } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { appendFile, readFile, unlink, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ensureRuntimeHome, readAuthToken, resolvePort, resolveRuntimePaths } from '../../core/src/index.mjs';
 import { createSparkieeServer } from './server.mjs';
 
 const paths = resolveRuntimePaths();
 const port = resolvePort();
 const host = '127.0.0.1';
+const require = createRequire(import.meta.url);
+const PET_APP_DIR = fileURLToPath(new URL('../../pet-host/', import.meta.url));
 let httpServer;
+let petHost;
 let shuttingDown = false;
 
 async function log(message) {
@@ -26,11 +33,53 @@ async function removePidIfOwned() {
   }
 }
 
+function launchPetHost(token) {
+  if (process.env.SPARKIEE_DISABLE_PET === '1') {
+    void log('Desktop pet host disabled by SPARKIEE_DISABLE_PET=1.');
+    return;
+  }
+  if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    void log('No graphical display detected; dashboard is running without a desktop pet host.');
+    return;
+  }
+  try {
+    const electronBinary = require('electron');
+    petHost = spawn(electronBinary, [PET_APP_DIR], {
+      cwd: PET_APP_DIR,
+      env: {
+        ...process.env,
+        SPARKIEE_PORT: String(port),
+        SPARKIEE_HOME: paths.home,
+        SPARKIEE_RUNTIME_TOKEN: token,
+      },
+      stdio: 'ignore',
+      detached: false,
+    });
+    petHost.on('error', (error) => {
+      void log(`Could not launch desktop pet host: ${error.message}. Ensure dependencies are installed with npm install.`);
+    });
+    petHost.on('exit', (code, signal) => {
+      void log(`Desktop pet host exited (code=${code ?? 'none'}, signal=${signal ?? 'none'}).`);
+      petHost = undefined;
+    });
+    void log('Desktop pet host launch requested.');
+  } catch (error) {
+    void log(`Desktop pet host unavailable: ${error.message}. Run npm install and check Electron dependencies.`);
+  }
+}
+
 async function shutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
   await log(`Shutting down (${reason}).`);
   await removePidIfOwned();
+  if (petHost && !petHost.killed) {
+    petHost.kill('SIGTERM');
+    const childToKill = petHost;
+    setTimeout(() => {
+      if (childToKill.exitCode === null && !childToKill.killed) childToKill.kill('SIGKILL');
+    }, 1800).unref();
+  }
   if (!httpServer?.listening) {
     process.exitCode = 0;
     return;
@@ -73,6 +122,7 @@ async function main() {
 
   await writeFile(paths.pidFile, `${process.pid}\n`, { mode: 0o600 });
   await log(`Sparkiee ready at http://${host}:${port} (pid ${process.pid}).`);
+  launchPetHost(token);
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('uncaughtException', async (error) => {

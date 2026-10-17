@@ -3,5 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Reserved for the future Electron pet window host"
+  "main": "src/main.mjs",
+  "description": "Electron desktop pet window host for Sparkiee"
 }
