@@ -94,7 +94,7 @@ export function isAuthorized(request, expectedToken) {
   return provided.length === expected.length && timingSafeEqual(provided, expected);
 }
 
-export function toRuntimePayload({ port, startedAt, pid = process.pid }) {
+export function toRuntimePayload({ port, startedAt, pid = process.pid, host }) {
   return {
     name: APP_NAME,
     version: APP_VERSION,
@@ -105,5 +105,6 @@ export function toRuntimePayload({ port, startedAt, pid = process.pid }) {
     dashboardUrl: `http://${DEFAULT_HOST}:${port}`,
     uptimeSeconds: Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
     protocolVersion: PROTOCOL_VERSION,
+    ...(host ? { petHost: host } : {}),
   };
 }

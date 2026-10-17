@@ -4,6 +4,8 @@ import { appendFile, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureRuntimeHome, readAuthToken, resolvePort, resolveRuntimePaths } from '../../core/src/index.mjs';
+import { resolveElectronBinary } from '../../core/src/electron-resolver.mjs';
+import { createHostTracker } from '../../core/src/host-tracker.mjs';
 import { createSparkieeServer } from './server.mjs';
 
 const paths = resolveRuntimePaths();
@@ -11,6 +13,9 @@ const port = resolvePort();
 const host = '127.0.0.1';
 const require = createRequire(import.meta.url);
 const PET_APP_DIR = fileURLToPath(new URL('../../pet-host/', import.meta.url));
+const petDisabled = process.env.SPARKIEE_DISABLE_PET === '1';
+const noDisplay = process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+const hostTracker = createHostTracker({ disabled: petDisabled, noDisplay });
 let httpServer;
 let petHost;
 let shuttingDown = false;
@@ -34,17 +39,30 @@ async function removePidIfOwned() {
 }
 
 function launchPetHost(token) {
-  if (process.env.SPARKIEE_DISABLE_PET === '1') {
-    void log('Desktop pet host disabled by SPARKIEE_DISABLE_PET=1.');
+  if (!hostTracker.canLaunch()) {
+    void log(petDisabled
+      ? 'Desktop pet host disabled by SPARKIEE_DISABLE_PET=1.'
+      : 'No graphical display detected; dashboard is running without a desktop pet host.');
     return;
   }
-  if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-    void log('No graphical display detected; dashboard is running without a desktop pet host.');
-    return;
-  }
+  hostTracker.markLaunching();
   try {
-    const electronBinary = require('electron');
-    petHost = spawn(electronBinary, [PET_APP_DIR], {
+    // Resolve the Electron binary without the stock `electron` entry point,
+    // which downloads synchronously and would block the HTTP server (the bug
+    // behind the "did not become ready" CLI timeout on first run).
+    let electronDir;
+    try {
+      electronDir = path.dirname(require.resolve('electron/package.json'));
+    } catch {
+      electronDir = undefined;
+    }
+    const resolved = resolveElectronBinary({ electronDir, overrideDistPath: process.env.ELECTRON_OVERRIDE_DIST_PATH });
+    if (!resolved.ok) {
+      hostTracker.markFailed(`${resolved.detail} ${resolved.hint}`);
+      void log(`Desktop pet host unavailable: ${hostTracker.snapshot().lastError}`);
+      return;
+    }
+    petHost = spawn(resolved.binary, [PET_APP_DIR], {
       cwd: PET_APP_DIR,
       env: {
         ...process.env,
@@ -55,16 +73,23 @@ function launchPetHost(token) {
       stdio: 'ignore',
       detached: false,
     });
+    petHost.on('spawn', () => {
+      if (petHost?.pid) hostTracker.markRunning(petHost.pid);
+      void log(`Desktop pet host running (pid ${petHost?.pid ?? 'unknown'}).`);
+    });
     petHost.on('error', (error) => {
-      void log(`Could not launch desktop pet host: ${error.message}. Ensure dependencies are installed with npm install.`);
+      hostTracker.markFailed(`Could not launch desktop pet host: ${error.message}. Ensure dependencies are installed with npm install.`);
+      void log(hostTracker.snapshot().lastError);
     });
     petHost.on('exit', (code, signal) => {
+      hostTracker.markExited(code, signal, { wasShuttingDown: shuttingDown });
       void log(`Desktop pet host exited (code=${code ?? 'none'}, signal=${signal ?? 'none'}).`);
       petHost = undefined;
     });
     void log('Desktop pet host launch requested.');
   } catch (error) {
-    void log(`Desktop pet host unavailable: ${error.message}. Run npm install and check Electron dependencies.`);
+    hostTracker.markFailed(`Desktop pet host unavailable: ${error.message}. Run npm install and check Electron dependencies.`);
+    void log(hostTracker.snapshot().lastError);
   }
 }
 
@@ -93,7 +118,12 @@ async function shutdown(reason) {
 async function main() {
   await ensureRuntimeHome(paths);
   const token = await readAuthToken(paths);
-  httpServer = createSparkieeServer({ port, token, onShutdown: () => void shutdown('API request') });
+  httpServer = createSparkieeServer({
+    port,
+    token,
+    onShutdown: () => void shutdown('API request'),
+    getHostState: () => hostTracker.snapshot(),
+  });
 
   httpServer.on('error', async (error) => {
     if (error?.code === 'EADDRINUSE') {

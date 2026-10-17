@@ -88,7 +88,14 @@ async function serveStatic(response, route) {
 }
 
 /** Create the loopback-only Sparkiee HTTP API and dashboard server. */
-export function createSparkieeServer({ port, token, startedAt = Date.now(), onShutdown = () => {}, petController = createPetController() }) {
+export function createSparkieeServer({
+  port,
+  token,
+  startedAt = Date.now(),
+  onShutdown = () => {},
+  petController = createPetController(),
+  getHostState = () => ({ phase: 'idle', pid: null, pidAlive: false, lastError: null, restarts: 0, since: startedAt }),
+}) {
   let shutdownRequested = false;
   const server = createServer(async (request, response) => {
     const host = request.socket.localAddress;
@@ -111,7 +118,7 @@ export function createSparkieeServer({ port, token, startedAt = Date.now(), onSh
       return;
     }
     if (method === 'GET' && pathname === '/api/v1/runtime') {
-      sendJson(response, 200, toRuntimePayload({ port, startedAt }));
+      sendJson(response, 200, toRuntimePayload({ port, startedAt, host: getHostState() }));
       return;
     }
     if (method === 'GET' && pathname === '/api/v1/pet/state') {

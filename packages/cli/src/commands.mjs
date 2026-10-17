@@ -17,7 +17,37 @@ import {
 
 const DAEMON_ENTRY = fileURLToPath(new URL('../../server/src/daemon.mjs', import.meta.url));
 const POLL_INTERVAL_MS = 80;
-const START_TIMEOUT_MS = 5_000;
+const DEFAULT_START_TIMEOUT_MS = 15_000;
+
+function resolveStartTimeoutMs(env) {
+  const raw = env.SPARKIEE_START_TIMEOUT_MS;
+  if (raw === undefined) return DEFAULT_START_TIMEOUT_MS;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 500 || value > 120_000) {
+    throw new Error(`Invalid SPARKIEE_START_TIMEOUT_MS "${raw}". Expected an integer from 500 to 120000.`);
+  }
+  return value;
+}
+
+function describeHost(petHost) {
+  if (!petHost) return 'Pet host: unknown';
+  switch (petHost.phase) {
+    case 'running':
+      return `Pet host: running (pid ${petHost.pid})`;
+    case 'launching':
+      return 'Pet host: launching…';
+    case 'disabled':
+      return 'Pet host: disabled (SPARKIEE_DISABLE_PET=1)';
+    case 'unavailable':
+      return 'Pet host: unavailable (no graphical session detected)';
+    case 'exited':
+      return 'Pet host: stopped';
+    case 'failed':
+      return `Pet host: FAILED — ${petHost.lastError ?? 'unknown error'}`;
+    default:
+      return `Pet host: ${petHost.phase}`;
+  }
+}
 
 function helpText() {
   return `Sparkiee ${APP_VERSION} — your extensible desktop-pet framework
@@ -75,8 +105,8 @@ async function getRuntime(port) {
   return null;
 }
 
-async function waitForStartup({ childPid, port, paths }) {
-  const deadline = Date.now() + START_TIMEOUT_MS;
+async function waitForStartup({ childPid, port, paths, timeoutMs }) {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const runtime = await getRuntime(port);
     if (runtime) return runtime;
@@ -91,18 +121,44 @@ async function waitForStartup({ childPid, port, paths }) {
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
-  throw new Error(`Sparkiee did not become ready within ${START_TIMEOUT_MS / 1000} seconds. Check ${paths.logFile}.`);
+  if (isPidAlive(childPid)) {
+    throw new Error(
+      `The runtime (pid ${childPid}) is still running but did not answer within ${timeoutMs / 1000} seconds. ` +
+      `Check ${paths.logFile}, then run "sparkiee stop" before retrying.`,
+    );
+  }
+  throw new Error(`Sparkiee did not become ready within ${timeoutMs / 1000} seconds. Check ${paths.logFile}.`);
 }
 
 async function start(env) {
   const port = resolvePort(env);
+  const timeoutMs = resolveStartTimeoutMs(env);
   const paths = resolveRuntimePaths(env);
   await ensureRuntimeHome(paths);
 
   const existing = await getRuntime(port);
   if (existing) {
-    process.stdout.write(`Sparkiee is already running at ${existing.dashboardUrl} (pid ${existing.pid}).\n`);
+    process.stdout.write(`Sparkiee is already running at ${existing.dashboardUrl} (pid ${existing.pid}).\n${describeHost(existing.petHost)}\n`);
     return;
+  }
+
+  // Guard against a hung or still-booting daemon that owns the port but does
+  // not answer: do not spawn a duplicate that would only fail with EADDRINUSE.
+  const stalePid = Number((await readFile(paths.pidFile, 'utf8').catch(() => '0')).trim());
+  if (isPidAlive(stalePid)) {
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const late = await getRuntime(port);
+      if (late) {
+        process.stdout.write(`Sparkiee is already running at ${late.dashboardUrl} (pid ${late.pid}).\n${describeHost(late.petHost)}\n`);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+    throw new Error(
+      `A Sparkiee runtime (pid ${stalePid}) is running but not answering on port ${port}. ` +
+      `Run "sparkiee stop" first, or remove ${paths.pidFile} if the process is a leftover.`,
+    );
   }
 
   // Persist a token before starting the detached daemon so the CLI and daemon share one credential.
@@ -122,8 +178,8 @@ async function start(env) {
   child.unref();
   if (!child.pid) throw new Error('Unable to launch the Sparkiee runtime process.');
 
-  const runtime = await waitForStartup({ childPid: child.pid, port, paths });
-  process.stdout.write(`Sparkiee started successfully.\nDashboard: ${runtime.dashboardUrl}\nPID: ${runtime.pid}\n`);
+  const runtime = await waitForStartup({ childPid: child.pid, port, paths, timeoutMs });
+  process.stdout.write(`Sparkiee started successfully.\nDashboard: ${runtime.dashboardUrl}\nPID: ${runtime.pid}\n${describeHost(runtime.petHost)}\n`);
 }
 
 async function status(env) {
@@ -133,7 +189,12 @@ async function status(env) {
     process.stdout.write(`Sparkiee is not running at http://${DEFAULT_HOST}:${port}.\n`);
     return;
   }
-  process.stdout.write(`Sparkiee is running.\nState: ${runtime.state}\nPID: ${runtime.pid}\nDashboard: ${runtime.dashboardUrl}\nUptime: ${runtime.uptimeSeconds}s\n`);
+  process.stdout.write(
+    `Sparkiee is running.\n` +
+    `Daemon: healthy — state ${runtime.state}, pid ${runtime.pid}, uptime ${runtime.uptimeSeconds}s\n` +
+    `${describeHost(runtime.petHost)}\n` +
+    `Dashboard: ${runtime.dashboardUrl}\n`,
+  );
 }
 
 async function stop(env) {
