@@ -9,6 +9,7 @@
 - A narrow preload API using context isolation; the pet renderer does not receive the runtime token.
 - A local pet-state API with strict command allowlisting and authenticated pet-host polling.
 - Dashboard buttons for emotes plus Hide / Show controls.
+- Manual drag interaction: the main process maps validated pointer positions to XWayland window coordinates.
 
 ## Data flow
 
@@ -23,6 +24,10 @@ Pet click or hide button
     -> isolated preload IPC
     -> Electron main process
     -> authenticated local API
+
+Pet drag
+    -> pointer coordinates through narrow preload IPC
+    -> bounds-checked window position in Electron main process
 ~~~
 
 The host polls every 900 ms. This is intentional prototype behaviour; a WebSocket transport can replace polling once basic desktop interaction has been validated.
@@ -51,7 +56,7 @@ For diagnostic logs, inspect $XDG_STATE_HOME/sparkiee/daemon.log or ~/.local/sta
 
 - Linux launches Electron with the X11 Ozone backend by default to use XWayland under GNOME.
 - If a fullscreen window covers the pet, return to a normal window or exit fullscreen; this is a documented compositor limitation.
-- No freeform walking path, multi-pet runtime, system tray, custom sound, or launch-on-login exists yet.
+- Manual dragging is implemented, but autonomous roaming / walking paths, multi-pet runtime, system tray, custom sound, and launch-on-login are not implemented yet.
 - Closing the pet window closes the Electron host; the daemon remains running.
 - Dashboard activity history is not persisted.
 - OpenCode is not connected in this milestone.
@@ -62,6 +67,7 @@ For diagnostic logs, inspect $XDG_STATE_HOME/sparkiee/daemon.log or ~/.local/sta
 - [ ] Window background is fully transparent.
 - [ ] Pet stays above normal windows.
 - [ ] Pet can be clicked to wave and shows status text.
+- [ ] Pet can be dragged to different positions on the desktop.
 - [ ] Dashboard Wave, Walk, Zoomies, Dance, Nap and Celebrate commands visibly change animation.
 - [ ] Hide removes the pet window; Show restores it.
 - [ ] Stopping Sparkiee closes the pet host.

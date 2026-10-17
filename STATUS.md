@@ -11,17 +11,16 @@ Updated: 2026-10-17
 - [x] Pet state machine with idle, walk, run, dance, sleep, celebrate, wave, surprised, hide, and show commands.
 - [x] Local API endpoints to read pet state and trigger supported commands.
 - [x] Dashboard emote controls, show/hide controls, live host status, and session-local activity history.
+- [x] Drag interaction wired from pet pointer events to native XWayland window movement.
 - [x] API request size limit and strict pet-command payload validation.
-- [x] CI updated to install workspace metadata without downloading the Electron binary on the test runner.
-- [x] JavaScript syntax check passed on GitHub Actions.
-- [x] Integration test assertion updated after the dashboard changed from placeholder content to live controls.
+- [x] GitHub Actions syntax check and test suite passed on commit e74fbc13eb129cbf103f25be7b36013b0a15b72c before the most recent drag refinement.
 
 ## Pending verification
 
 - [ ] Confirm the latest GitHub Actions run is green for the current HEAD.
 - [ ] Run npm install, npm run check, and npm test on Fedora 44 GNOME/Wayland.
 - [ ] Verify the Electron host launches and draws transparency correctly under XWayland.
-- [ ] Verify stay-on-top, non-focus-stealing startup, native dragging, and window bounds on the user's GNOME session.
+- [ ] Verify stay-on-top, non-focus-stealing startup, manual dragging, and window bounds on the user's GNOME session.
 - [ ] Verify dashboard emote buttons visibly change the desktop pet.
 - [ ] Verify Hide and Show both work when invoked from the dashboard.
 - [ ] Improve lifecycle handling if the Electron host is closed or crashes.
@@ -34,7 +33,8 @@ Updated: 2026-10-17
 
 - Electron host and transparent window code are a prototype and have not been visually tested from this repository automation environment.
 - Window positioning and stay-on-top depend on XWayland and the compositor; native Wayland mode is not supported for the required controls.
-- Pet movement currently animates in place. Free movement across the desktop, multi-pet management, system tray integration, and character downloads are not implemented.
+- Manual dragging is implemented, but autonomous wandering / path movement is not.
+- Multi-pet management, system tray integration, and character downloads are not implemented.
 - Activity history is session-local to the dashboard and is not persisted.
 - The pet does not yet observe OpenCode sessions; no coding task completion notifications are implemented.
 - The npm package remains unpublished.
