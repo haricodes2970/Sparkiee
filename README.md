@@ -2,69 +2,70 @@
 
 **An extensible desktop-pet framework for developers.**
 
-Sparkiee aims to bring animated desktop companions, expressive emotes, a local control dashboard, and coding-agent notifications together in one lightweight application.
+Sparkiee is a local-first desktop companion app with a character-agnostic design, animated pet host, local web control centre, and future coding-agent integrations.
 
 ## Project status
 
-Phase 0 architecture research is documented. **Phase 1 runtime foundation is implemented and locally tested.** See [STATUS.md](STATUS.md) for what is real today and what remains planned.
+- Phase 0 — architecture research: documented.
+- Phase 1 — CLI, local daemon, API and dashboard: implemented.
+- Phase 2 — first desktop pet and live control API: prototype implemented; verify on Fedora GNOME/Wayland before treating window behaviour as stable.
 
-- [Architecture](ARCHITECTURE.md)
-- [Status and next steps](STATUS.md)
-- [Architecture decision records](docs/adr/README.md)
+See [STATUS.md](STATUS.md), [ARCHITECTURE.md](ARCHITECTURE.md), and [Phase 2 notes](docs/PHASE_2_DESKTOP_PET.md).
 
-The current milestone includes a workspace scaffold, CLI, local daemon/API, and a static dashboard at `http://127.0.0.1:2005`. Desktop pet rendering, character animation, WebSocket control, and OpenCode integration are future phases.
+## Local development
 
-## CLI
+Requirements: Node.js 22 or later, npm, and a graphical desktop session for the Electron pet window.
 
-The intended public install flow, once published:
-
-```bash
-npm install -g sparkiee
-sparkiee
-```
-
-Available commands in the current source tree:
-
-```bash
-sparkiee            # start the runtime (default command)
-sparkiee start      # start the local runtime and dashboard
-sparkiee status     # report runtime state
-sparkiee stop       # authenticated graceful shutdown
-sparkiee --help
-sparkiee --version
-```
-
-The runtime binds to `127.0.0.1` on port `2005` by default. Override with `SPARKIEE_PORT`. Runtime state and its private token live under `$XDG_STATE_HOME/sparkiee` or `~/.local/state/sparkiee`; `SPARKIEE_HOME` can override that path.
-
-## Development
-
-Requirements: Node.js 22 or later. The Phase 1 runtime uses Node.js built-ins; no runtime dependency installation is needed.
-
-```bash
+~~~bash
+git clone https://github.com/haricodes2970/Sparkiee.git
+cd Sparkiee
+npm install
 npm run check
 npm test
 npm link
+sparkiee start
+~~~
+
+Open http://127.0.0.1:2005 to control the pet. The runtime binds to loopback only.
+
+Available commands:
+
+~~~bash
+sparkiee            # starts runtime and pet host when a GUI is available
+sparkiee start
+sparkiee status
+sparkiee stop
 sparkiee --help
-```
+sparkiee --version
+~~~
 
-The npm tarball has been smoke-tested in a temporary installation prefix. Before publishing or using globally on the target machine, run the checks on Fedora GNOME/Wayland as well.
+The Electron dependency downloads a platform-specific desktop runtime during npm install. This initial implementation has not been published to npm; npm link exposes the local checkout as the sparkiee command.
 
-## Design principles
+## Useful environment variables
 
-- Local-first. No cloud account is required for core functionality.
-- Character-agnostic runtime; characters are separate packs.
-- Desktop pets must not steal keyboard focus.
-- Explicit security boundaries between dashboard, runtime, and integrations.
-- Honest task states; idle does not automatically mean successful completion.
-- Small, independently tested changes.
+- SPARKIEE_PORT: local HTTP port (default 2005).
+- SPARKIEE_HOME: override local state directory.
+- SPARKIEE_DISABLE_PET=1: start the daemon without launching the Electron pet host (useful for headless testing).
+- SPARKIEE_OZONE_PLATFORM=wayland: opt out of the default XWayland selection to test another backend; global positioning and always-on-top behaviour are not promised on native Wayland.
 
-## Current compatibility target
+## Security principles
 
-Fedora Linux with GNOME on Wayland, using an XWayland-backed Electron pet host for the window-management capabilities identified in the Phase 0 investigation. Known limitations are documented in the architecture report.
+- Local-only listener at 127.0.0.1.
+- Per-install runtime token stored in the user's local state directory with restrictive permissions.
+- Token-protected pet-host API calls and shutdown endpoint.
+- Same-origin check and strict payload validation for dashboard pet commands.
+- No arbitrary shell command endpoint, remote analytics, or cloud requirement.
+- No automated approval of coding-agent permissions.
 
-## Important limitations
+## Roadmap
 
-- The current dashboard shows runtime state and a roadmap placeholder; it does not control desktop pets yet.
-- No desktop pet renderer, sound system, or character packs are implemented yet.
-- The OpenCode adapter is not implemented yet.
-- The npm package is not published. Re-check package-name availability before release.
+1. Stabilise the Electron pet host on the target Fedora desktop.
+2. Improve dragging, emotes, idle reactions, and accessibility.
+3. Add sound and native desktop notifications.
+4. Build the character-pack SDK and multiple pets.
+5. Add the OpenCode observer plugin for completion/error/permission events.
+6. Prepare reproducible cross-platform npm packaging.
+
+## License
+
+MIT. Character assets added in future versions must be original or appropriately licensed.
