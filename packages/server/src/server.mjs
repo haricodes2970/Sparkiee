@@ -12,6 +12,7 @@ const STATIC_FILES = new Map([
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
   ['/src/main.js', ['src/main.js', 'text/javascript; charset=utf-8']],
   ['/src/styles.css', ['src/styles.css', 'text/css; charset=utf-8']],
+  ['/src/pet-controls.css', ['src/pet-controls.css', 'text/css; charset=utf-8']],
 ]);
 
 function sendJson(response, status, value) {
@@ -53,8 +54,6 @@ async function readJsonBody(request, limit = 4096) {
 }
 
 function isSameOriginDashboardRequest(request, port) {
-  // Browsers send Origin on fetch POST requests. Keep the dashboard's state-changing
-  // operations same-origin so arbitrary websites cannot issue local pet commands.
   return request.headers.origin === `http://${DEFAULT_HOST}:${port}` &&
     request.headers.host === `${DEFAULT_HOST}:${port}`;
 }

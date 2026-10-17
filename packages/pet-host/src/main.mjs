@@ -14,12 +14,9 @@ let pollTimer;
 let lastState = '';
 let latestState = null;
 
-if (process.platform === 'linux') {
+if (process.platform === 'linux' && process.env.SPARKIEE_OZONE_PLATFORM !== 'wayland') {
   // Phase 0 selected XWayland for GNOME because the pet needs window positioning.
-  // Keep this before app.whenReady(); users can opt out to test another backend.
-  if (process.env.SPARKIEE_OZONE_PLATFORM !== 'wayland') {
-    app.commandLine.appendSwitch('ozone-platform', 'x11');
-  }
+  app.commandLine.appendSwitch('ozone-platform', 'x11');
 }
 
 function apiUrl(route) {
@@ -31,11 +28,7 @@ async function requestApi(route, options = {}) {
   const response = await fetch(apiUrl(route), {
     ...options,
     signal: AbortSignal.timeout(1600),
-    headers: {
-      accept: 'application/json',
-      authorization: `Bearer ${TOKEN}`,
-      ...options.headers,
-    },
+    headers: { accept: 'application/json', authorization: `Bearer ${TOKEN}`, ...options.headers },
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || `Runtime returned HTTP ${response.status}`);
@@ -56,25 +49,21 @@ function publishState(state) {
 
 async function pollState() {
   try {
-    const payload = await requestApi('/api/v1/pet/state');
-    publishState(payload);
-  } catch (error) {
-    const offline = {
+    publishState(await requestApi('/api/v1/pet/state'));
+  } catch {
+    publishState({
       ...(latestState || {}),
       animation: 'surprised',
       label: 'Runtime disconnected',
       message: 'I cannot reach Sparkiee right now.',
       hostConnected: false,
       visible: true,
-    };
-    publishState(offline);
+    });
   }
 }
 
 async function sendCommand(command) {
-  if (typeof command !== 'string' || !VALID_COMMANDS.has(command)) {
-    throw new Error('Unsupported Sparkiee pet command.');
-  }
+  if (typeof command !== 'string' || !VALID_COMMANDS.has(command)) throw new Error('Unsupported Sparkiee pet command.');
   const payload = await requestApi('/api/v1/pet/command', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -85,15 +74,14 @@ async function sendCommand(command) {
 }
 
 function createPetWindow() {
-  const display = screen.getPrimaryDisplay();
-  const area = display.workArea;
+  const { workArea } = screen.getPrimaryDisplay();
   const width = 204;
   const height = 220;
   const pet = new BrowserWindow({
     width,
     height,
-    x: Math.max(area.x, area.x + area.width - width - 24),
-    y: Math.max(area.y, area.y + area.height - height - 30),
+    x: Math.max(workArea.x, workArea.x + workArea.width - width - 24),
+    y: Math.max(workArea.y, workArea.y + workArea.height - height - 30),
     show: false,
     frame: false,
     transparent: true,
@@ -108,14 +96,14 @@ function createPetWindow() {
     hasShadow: false,
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(APP_DIR, 'src', 'preload.mjs'),
+      preload: path.join(APP_DIR, 'src', 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
   });
   pet.setMenu(null);
-  pet.setAlwaysOnTop(true, 'floating');
+  pet.setAlwaysOnTop(true);
   pet.on('ready-to-show', () => pet.showInactive());
   pet.on('closed', () => {
     petWindow = undefined;

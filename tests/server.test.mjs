@@ -51,18 +51,22 @@ test('health and runtime routes return minimal status data', async () => {
   }
 });
 
-test('dashboard files are served with a restrictive content security policy', async () => {
+test('dashboard and all referenced assets are served with a restrictive content security policy', async () => {
   const instance = await startServer();
   try {
     const page = await fetch(`http://127.0.0.1:${instance.port}/`);
     assert.equal(page.status, 200);
     assert.match(page.headers.get('content-type'), /text\/html/);
     assert.match(page.headers.get('content-security-policy'), /default-src 'self'/);
-    assert.match(await page.text(), /Sparkiee — Pet Control Centre/);
+    const html = await page.text();
+    assert.match(html, /Sparkiee — Pet Control Centre/);
+    assert.match(html, /data-pet-command="dance"/);
 
-    const script = await fetch(`http://127.0.0.1:${instance.port}/src/main.js`);
-    assert.equal(script.status, 200);
-    assert.match(script.headers.get('content-type'), /javascript/);
+    for (const [route, type] of [['/src/main.js', /javascript/], ['/src/styles.css', /text\/css/], ['/src/pet-controls.css', /text\/css/]]) {
+      const asset = await fetch(`http://127.0.0.1:${instance.port}${route}`);
+      assert.equal(asset.status, 200, route);
+      assert.match(asset.headers.get('content-type'), type);
+    }
   } finally {
     await close(instance.server);
   }
@@ -100,8 +104,7 @@ test('dashboard can trigger an animation only from the exact same origin', async
       body: JSON.stringify({ command: 'dance' }),
     });
     assert.equal(accepted.status, 200);
-    const result = await accepted.json();
-    assert.equal(result.pet.animation, 'dance');
+    assert.equal((await accepted.json()).pet.animation, 'dance');
 
     const invalid = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/command`, {
       method: 'POST',
