@@ -54,8 +54,17 @@ async function readJsonBody(request, limit = 4096) {
 }
 
 function isSameOriginDashboardRequest(request, port) {
-  return request.headers.origin === `http://${DEFAULT_HOST}:${port}` &&
-    request.headers.host === `${DEFAULT_HOST}:${port}`;
+  const origin = request.headers.origin;
+  const requestHost = request.headers.host;
+  if (typeof origin !== 'string' || typeof requestHost !== 'string') return false;
+  if (origin !== `http://${requestHost}`) return false;
+  if (!requestHost.endsWith(`:${port}`)) return false;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1';
+  } catch {
+    return false;
+  }
 }
 
 async function serveStatic(response, route) {
@@ -95,6 +104,7 @@ export function createSparkieeServer({
   onShutdown = () => {},
   petController = createPetController(),
   getHostState = () => ({ phase: 'idle', pid: null, pidAlive: false, lastError: null, restarts: 0, since: startedAt }),
+  onRestartHost = () => {},
 }) {
   let shutdownRequested = false;
   const server = createServer(async (request, response) => {
@@ -143,6 +153,20 @@ export function createSparkieeServer({
         return;
       }
       sendJson(response, 200, { ok: true, pet: petController.command(payload.command) });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/host/restart') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      try {
+        await onRestartHost();
+      } catch (error) {
+        sendJson(response, 500, { error: `Pet host restart failed: ${error.message}`, host: getHostState() });
+        return;
+      }
+      sendJson(response, 202, { ok: true, host: getHostState() });
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/shutdown') {

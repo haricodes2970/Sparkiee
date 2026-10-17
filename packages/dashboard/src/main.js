@@ -14,9 +14,67 @@ const lastChecked = document.querySelector('#last-checked');
 const liveRegion = document.querySelector('#live-region');
 const activityList = document.querySelector('#activity-list');
 const commandButtons = document.querySelectorAll('[data-pet-command]');
+const retryHostButton = document.querySelector('#retry-host');
 const activity = [];
 let lastPetState = null;
 let commandInFlight = false;
+let lastHostPhase = null;
+
+const HOST_PHASE_LABELS = {
+  running: 'Running',
+  launching: 'Launching…',
+  idle: 'Not started',
+  exited: 'Stopped',
+  failed: 'Launch failed',
+  disabled: 'Disabled',
+  unavailable: 'No display',
+};
+
+function recordActivity(command, label, message, time) {
+  activity.unshift({ command, label, message, time: time || new Date().toISOString() });
+  activity.splice(8);
+  renderActivity();
+}
+
+function applyHostState(petHost) {
+  if (!petHost || typeof petHost !== 'object') return;
+  const phase = petHost.phase in HOST_PHASE_LABELS ? petHost.phase : 'idle';
+  petHostStat.textContent = HOST_PHASE_LABELS[phase];
+  petHostCaption.textContent = phase === 'running'
+    ? `Desktop pet process ${petHost.pid}${petHost.pidAlive === false ? ' (not responding)' : ''}`
+    : (petHost.lastError || 'The desktop pet window is not running right now.');
+  retryHostButton.hidden = !(phase === 'failed' || phase === 'exited');
+  if (lastHostPhase !== null && lastHostPhase !== phase) {
+    recordActivity('host', `Pet host ${HOST_PHASE_LABELS[phase].toLowerCase()}`, petHost.lastError || `Phase changed to ${phase}.`);
+  }
+  lastHostPhase = phase;
+}
+
+async function retryHostLaunch() {
+  retryHostButton.disabled = true;
+  commandFeedback.className = 'command-feedback';
+  commandFeedback.textContent = 'Asking the runtime to relaunch the desktop pet…';
+  try {
+    const response = await fetch('/api/v1/host/restart', {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: '{}',
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    applyHostState(result.host);
+    commandFeedback.className = 'command-feedback success';
+    commandFeedback.textContent = result.host.phase === 'running'
+      ? `Desktop pet is running again (pid ${result.host.pid}).`
+      : `Relaunch requested — the pet host is ${HOST_PHASE_LABELS[result.host.phase] || result.host.phase}.`;
+  } catch (error) {
+    commandFeedback.className = 'command-feedback error';
+    commandFeedback.textContent = error.message || 'Could not relaunch the desktop pet host.';
+  } finally {
+    retryHostButton.disabled = false;
+  }
+}
 
 function setConnectionState(state, text) {
   connectionPill.className = `status-pill ${state}`;
@@ -86,6 +144,7 @@ async function refreshRuntime() {
     runtimeState.textContent = runtime.state === 'ready' ? 'Online' : 'Not ready';
     runtimeCaption.textContent = `Process ${runtime.pid} · ${formatUptime(runtime.uptimeSeconds)}`;
     runtimePort.textContent = String(runtime.port);
+    applyHostState(runtime.petHost);
     setConnectionState('online', 'Runtime connected');
     lastChecked.textContent = `Last checked ${new Date().toLocaleTimeString()}`;
   } catch {
@@ -128,9 +187,7 @@ async function sendPetCommand(command) {
     commandFeedback.className = 'command-feedback success';
     commandFeedback.textContent = `Sparkiee: ${result.pet.message}`;
     if (!['show', 'hide'].includes(command)) {
-      activity.unshift({ command, label: result.pet.label, message: result.pet.message, time: result.pet.updatedAt || new Date().toISOString() });
-      activity.splice(8);
-      renderActivity();
+      recordActivity(command, result.pet.label, result.pet.message, result.pet.updatedAt);
     }
   } catch (error) {
     commandFeedback.className = 'command-feedback error';
@@ -145,6 +202,7 @@ async function sendPetCommand(command) {
 for (const button of commandButtons) {
   button.addEventListener('click', () => void sendPetCommand(button.dataset.petCommand));
 }
+retryHostButton.addEventListener('click', () => void retryHostLaunch());
 
 void refreshRuntime();
 void refreshPet();

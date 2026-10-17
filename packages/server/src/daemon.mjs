@@ -16,6 +16,9 @@ const PET_APP_DIR = fileURLToPath(new URL('../../pet-host/', import.meta.url));
 const petDisabled = process.env.SPARKIEE_DISABLE_PET === '1';
 const noDisplay = process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
 const hostTracker = createHostTracker({ disabled: petDisabled, noDisplay });
+const MAX_HOST_RESTARTS = 3;
+let runtimeToken = null;
+let restartTimer;
 let httpServer;
 let petHost;
 let shuttingDown = false;
@@ -85,6 +88,7 @@ function launchPetHost(token) {
       hostTracker.markExited(code, signal, { wasShuttingDown: shuttingDown });
       void log(`Desktop pet host exited (code=${code ?? 'none'}, signal=${signal ?? 'none'}).`);
       petHost = undefined;
+      scheduleHostRestart();
     });
     void log('Desktop pet host launch requested.');
   } catch (error) {
@@ -93,9 +97,50 @@ function launchPetHost(token) {
   }
 }
 
+function scheduleHostRestart() {
+  if (shuttingDown || !hostTracker.canLaunch() || !runtimeToken) return;
+  if (restartTimer) return;
+  if (hostTracker.restarts >= MAX_HOST_RESTARTS) {
+    void log(`Desktop pet host restart limit (${MAX_HOST_RESTARTS}) reached. Use the dashboard retry action or restart Sparkiee.`);
+    return;
+  }
+  const delay = 1_000 * (2 ** hostTracker.restarts);
+  hostTracker.countRestart();
+  void log(`Scheduling desktop pet host restart in ${delay}ms (attempt ${hostTracker.restarts}/${MAX_HOST_RESTARTS}).`);
+  restartTimer = setTimeout(() => {
+    restartTimer = undefined;
+    if (!shuttingDown && !petHost) launchPetHost(runtimeToken);
+  }, delay);
+  restartTimer.unref();
+}
+
+async function restartHost() {
+  if (!hostTracker.canLaunch()) {
+    hostTracker.markFailed(petDisabled
+      ? 'Pet host cannot start: disabled by SPARKIEE_DISABLE_PET=1.'
+      : 'Pet host cannot start: no graphical session was detected.');
+    return;
+  }
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = undefined;
+  }
+  hostTracker.resetFailures();
+  if (petHost && !petHost.killed) {
+    // Already running; report the live process instead of spawning a duplicate.
+    return;
+  }
+  await log('Desktop pet host restart requested.');
+  launchPetHost(runtimeToken);
+}
+
 async function shutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = undefined;
+  }
   await log(`Shutting down (${reason}).`);
   await removePidIfOwned();
   if (petHost && !petHost.killed) {
@@ -123,7 +168,9 @@ async function main() {
     token,
     onShutdown: () => void shutdown('API request'),
     getHostState: () => hostTracker.snapshot(),
+    onRestartHost: () => restartHost(),
   });
+  runtimeToken = token;
 
   httpServer.on('error', async (error) => {
     if (error?.code === 'EADDRINUSE') {

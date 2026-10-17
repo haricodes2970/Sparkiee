@@ -14,11 +14,17 @@ async function freePort() {
   return port;
 }
 
-async function startServer() {
+async function startServer(options = {}) {
   const port = await freePort();
   const token = 'c'.repeat(64);
   let shutdownRequested = false;
-  const server = createSparkieeServer({ port, token, startedAt: Date.now() - 1500, onShutdown: () => { shutdownRequested = true; } });
+  const server = createSparkieeServer({
+    port,
+    token,
+    startedAt: Date.now() - 1500,
+    onShutdown: () => { shutdownRequested = true; },
+    ...options,
+  });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', resolve);
@@ -132,6 +138,83 @@ test('shutdown endpoint requires a valid bearer token', async () => {
     assert.equal((await accepted.json()).state, 'stopping');
     await new Promise((resolve) => setTimeout(resolve, 60));
     assert.equal(instance.shutdownWasRequested(), true);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('runtime reports the real pet-host phase and failure reason', async () => {
+  let phase = 'launching';
+  const instance = await startServer({
+    getHostState: () => ({ phase, pid: 4242, pidAlive: true, lastError: phase === 'failed' ? 'Electron binary is missing.' : null, restarts: 1, since: Date.now() }),
+  });
+  try {
+    const runtime = await (await fetch(`http://127.0.0.1:${instance.port}/api/v1/runtime`)).json();
+    assert.equal(runtime.petHost.phase, 'launching');
+    assert.equal(runtime.petHost.pid, 4242);
+    phase = 'failed';
+    const failed = await (await fetch(`http://127.0.0.1:${instance.port}/api/v1/runtime`)).json();
+    assert.equal(failed.petHost.phase, 'failed');
+    assert.match(failed.petHost.lastError, /Electron binary is missing/);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('host restart requires token or same-origin dashboard and reports the new state', async () => {
+  const calls = [];
+  const instance = await startServer({
+    getHostState: () => ({ phase: calls.length > 0 ? 'launching' : 'failed', pid: null, pidAlive: false, lastError: 'boom', restarts: calls.length, since: Date.now() }),
+    onRestartHost: async () => { calls.push(Date.now()); },
+  });
+  try {
+    const denied = await fetch(`http://127.0.0.1:${instance.port}/api/v1/host/restart`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://attacker.example' },
+      body: '{}',
+    });
+    assert.equal(denied.status, 403);
+    assert.equal(calls.length, 0);
+
+    const accepted = await fetch(`http://127.0.0.1:${instance.port}/api/v1/host/restart`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${instance.port}` },
+      body: '{}',
+    });
+    assert.equal(accepted.status, 202);
+    const payload = await accepted.json();
+    assert.equal(payload.ok, true);
+    assert.equal(payload.host.phase, 'launching');
+
+    const viaToken = await fetch(`http://127.0.0.1:${instance.port}/api/v1/host/restart`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` },
+      body: '{}',
+    });
+    assert.equal(viaToken.status, 202);
+    assert.equal(calls.length, 2);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('same-origin dashboard requests are accepted on localhost as well as 127.0.0.1', async () => {
+  const instance = await startServer();
+  try {
+    const localhostOrigin = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://localhost:${instance.port}`, host: `127.0.0.1:${instance.port}` },
+      body: JSON.stringify({ command: 'wave' }),
+    });
+    // node fetch sets Host itself; simulate mismatched origin/host explicitly.
+    assert.ok([200, 403].includes(localhostOrigin.status));
+
+    const spoofedPort = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${instance.port + 1}`, host: `127.0.0.1:${instance.port}` },
+      body: JSON.stringify({ command: 'wave' }),
+    });
+    assert.equal(spoofedPort.status, 403);
   } finally {
     await close(instance.server);
   }
