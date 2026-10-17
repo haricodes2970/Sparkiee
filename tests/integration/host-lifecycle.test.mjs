@@ -63,7 +63,7 @@ async function readToken(env) {
 }
 
 test('a missing Electron binary is reported honestly and does not break the daemon', async () => {
-  const { scratch, port, home, env } = await makeEnv({ SPARKIEE_ELECTRON_DIR: '/nonexistent-electron-dir' });
+  const { scratch, port, home, env } = await makeEnv({ SPARKIEE_ELECTRON_DIR: '/nonexistent-electron-dir', DISPLAY: ':9876' });
   delete env.SPARKIEE_DISABLE_PET;
   try {
     const started = await runCli(['start'], env);
