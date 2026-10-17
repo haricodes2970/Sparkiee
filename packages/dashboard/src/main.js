@@ -15,10 +15,14 @@ const liveRegion = document.querySelector('#live-region');
 const activityList = document.querySelector('#activity-list');
 const commandButtons = document.querySelectorAll('[data-pet-command]');
 const retryHostButton = document.querySelector('#retry-host');
+const speedSlider = document.querySelector('#move-speed');
+const speedValue = document.querySelector('#move-speed-value');
+const autoRoamToggle = document.querySelector('#auto-roam');
 const activity = [];
 let lastPetState = null;
 let commandInFlight = false;
 let lastHostPhase = null;
+let settingsInFlight = false;
 
 const HOST_PHASE_LABELS = {
   running: 'Running',
@@ -44,6 +48,8 @@ function applyHostState(petHost) {
     ? `Desktop pet process ${petHost.pid}${petHost.pidAlive === false ? ' (not responding)' : ''}`
     : (petHost.lastError || 'The desktop pet window is not running right now.');
   retryHostButton.hidden = !(phase === 'failed' || phase === 'exited');
+  const stage = document.querySelector('.pet-preview-stage');
+  if (stage) stage.classList.toggle('host-offline-stage', phase === 'failed' || phase === 'exited');
   if (lastHostPhase !== null && lastHostPhase !== phase) {
     recordActivity('host', `Pet host ${HOST_PHASE_LABELS[phase].toLowerCase()}`, petHost.lastError || `Phase changed to ${phase}.`);
   }
@@ -130,6 +136,13 @@ function applyPetState(state) {
   petVisibilityText.textContent = state.visible === false ? 'Pet is hidden' : 'Pet is visible';
   document.querySelector('#show-pet').disabled = state.visible !== false;
   document.querySelector('#hide-pet').disabled = state.visible === false;
+  if (state.settings && document.activeElement !== speedSlider) {
+    speedSlider.value = String(state.settings.moveSpeed ?? 1);
+  }
+  speedValue.textContent = `${speedSlider.value}×`;
+  if (state.settings && document.activeElement !== autoRoamToggle) {
+    autoRoamToggle.checked = state.settings.autoRoam !== false;
+  }
   document.querySelector('#preview-character').classList.remove('preview-idle', 'preview-wave', 'preview-dance', 'preview-sleep', 'preview-run', 'preview-celebrate');
   const animation = ['idle', 'wave', 'dance', 'sleep', 'run', 'celebrate'].includes(state.animation) ? state.animation : 'idle';
   document.querySelector('#preview-character').classList.add(`preview-${animation}`);
@@ -198,6 +211,46 @@ async function sendPetCommand(command) {
     if (lastPetState) applyPetState(lastPetState);
   }
 }
+
+async function sendSettings(partial, describe) {
+  if (settingsInFlight) return;
+  settingsInFlight = true;
+  commandFeedback.className = 'command-feedback';
+  commandFeedback.textContent = 'Saving movement settings…';
+  try {
+    const response = await fetch('/api/v1/pet/settings', {
+      method: 'PUT',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify(partial),
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    applyPetState(result.pet);
+    commandFeedback.className = 'command-feedback success';
+    commandFeedback.textContent = describe;
+    recordActivity('settings', 'Movement settings updated', describe);
+  } catch (error) {
+    commandFeedback.className = 'command-feedback error';
+    commandFeedback.textContent = error.message || 'Could not save movement settings.';
+  } finally {
+    settingsInFlight = false;
+  }
+}
+
+let speedDebounce;
+speedSlider.addEventListener('input', () => { speedValue.textContent = `${speedSlider.value}×`; });
+speedSlider.addEventListener('change', () => {
+  window.clearTimeout(speedDebounce);
+  speedDebounce = window.setTimeout(() => {
+    const speed = Number(speedSlider.value);
+    void sendSettings({ moveSpeed: speed }, `Movement speed set to ${speed}×.`);
+  }, 250);
+});
+autoRoamToggle.addEventListener('change', () => {
+  const enabled = autoRoamToggle.checked;
+  void sendSettings({ autoRoam: enabled }, enabled ? 'Auto-roam enabled.' : 'Auto-roam disabled.');
+});
 
 for (const button of commandButtons) {
   button.addEventListener('click', () => void sendPetCommand(button.dataset.petCommand));

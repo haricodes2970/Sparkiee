@@ -65,20 +65,34 @@
           <article class="panel pet-panel">
             <div class="panel-heading"><div><div class="eyebrow">YOUR DESKTOP COMPANION</div><h2>Say hi to Sparkiee</h2></div><span id="pet-host-pill" class="coming-tag">CHECKING HOST</span></div>
             <div class="empty-character">
-              <div class="character-stage pet-preview-stage"><span class="stage-star stage-star-a">✦</span><span class="stage-star stage-star-b">✧</span><div id="preview-character" class="character-placeholder"><span class="character-face">◡</span><span class="character-eye eye-left"></span><span class="character-eye eye-right"></span><span class="character-cheek cheek-left"></span><span class="character-cheek cheek-right"></span><span class="character-foot foot-left"></span><span class="character-foot foot-right"></span></div><div class="stage-shadow"></div><span class="stage-spark spark-a">✦</span><span class="stage-spark spark-b">·</span></div>
+              <div class="character-stage pet-preview-stage"><span class="preview-badge">PREVIEW · the real pet lives on your desktop</span><span class="stage-star stage-star-a">✦</span><span class="stage-star stage-star-b">✧</span><div id="preview-character" class="character-placeholder"><span class="character-face">◡</span><span class="character-eye eye-left"></span><span class="character-eye eye-right"></span><span class="character-cheek cheek-left"></span><span class="character-cheek cheek-right"></span><span class="character-foot foot-left"></span><span class="character-foot foot-right"></span></div><div class="stage-shadow"></div><span class="stage-spark spark-a">✦</span><span class="stage-spark spark-b">·</span></div>
               <div class="empty-copy"><h3 id="pet-status-label">Getting ready for an adventure.</h3><p id="pet-status-message">Use an emote below and watch your desktop companion react. This control panel also works when the pet window is hidden.</p><div class="feature-chips"><span>Original pixel pet</span><span>Live commands</span><span>Local only</span></div></div>
             </div>
             <div class="pet-actions">
               <div class="action-heading"><span>EMOTES</span><span class="action-hint">Tap to trigger</span></div>
               <div class="emote-grid">
                 <button type="button" class="emote-button" data-pet-command="wave"><span>↗</span> Wave</button>
-                <button type="button" class="emote-button" data-pet-command="walk"><span>⌁</span> Walk</button>
-                <button type="button" class="emote-button" data-pet-command="run"><span>»</span> Zoomies</button>
                 <button type="button" class="emote-button" data-pet-command="dance"><span>♫</span> Dance</button>
                 <button type="button" class="emote-button" data-pet-command="sleep"><span>☾</span> Nap</button>
                 <button type="button" class="emote-button" data-pet-command="celebrate"><span>✧</span> Celebrate</button>
+                <button type="button" class="emote-button" data-pet-command="idle"><span>○</span> Idle</button>
               </div>
-              <div class="pet-visibility-controls"><span id="pet-visibility-text">Pet visibility</span><div><button type="button" id="show-pet" class="secondary-action" data-pet-command="show">Show pet</button><button type="button" id="hide-pet" class="secondary-action" data-pet-command="hide">Hide pet</button></div></div>
+              <div class="action-heading movement-heading"><span>DESKTOP MOVEMENT</span><span class="action-hint">Moves the real window</span></div>
+              <div class="emote-grid">
+                <button type="button" class="emote-button" data-pet-command="walk"><span>⌁</span> Walk</button>
+                <button type="button" class="emote-button" data-pet-command="run"><span>»</span> Zoomies</button>
+              </div>
+              <div class="movement-settings">
+                <label class="movement-setting" for="move-speed">Speed
+                  <input type="range" id="move-speed" min="0.25" max="3" step="0.25" value="1" />
+                  <output id="move-speed-value" for="move-speed">1×</output>
+                </label>
+                <label class="movement-setting roam-setting" for="auto-roam">
+                  <input type="checkbox" id="auto-roam" checked />
+                  <span>Auto-roam while idle</span>
+                </label>
+              </div>
+              <div class="pet-visibility-controls"><span id="pet-visibility-text">Pet visibility</span><div><button type="button" id="show-pet" class="secondary-action" data-pet-command="show">Summon pet</button><button type="button" id="hide-pet" class="secondary-action" data-pet-command="hide">Hide pet</button></div></div>
               <div class="command-feedback" id="command-feedback" role="status" aria-live="polite">Ready for an emote.</div>
             </div>
             <div class="panel-footer"><span><span class="footer-dot"></span> Character packs · designed to be extensible</span><span class="footer-caption">More companions later</span></div>
