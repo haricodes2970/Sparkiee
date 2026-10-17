@@ -3,7 +3,8 @@ import { access, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isAuthorized, toRuntimePayload } from '../../core/src/index.mjs';
+import { isAuthorized, toRuntimePayload, DEFAULT_HOST } from '../../core/src/index.mjs';
+import { createPetController, isValidPetCommandPayload } from '../../core/src/pet-state.mjs';
 
 const DASHBOARD_ROOT = fileURLToPath(new URL('../../dashboard/', import.meta.url));
 const STATIC_FILES = new Map([
@@ -23,6 +24,39 @@ function sendJson(response, status, value) {
     'referrer-policy': 'no-referrer',
   });
   response.end(body);
+}
+
+async function readJsonBody(request, limit = 4096) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > limit) {
+      const error = new Error('Request body is too large.');
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  if (size === 0) {
+    const error = new Error('A JSON request body is required.');
+    error.statusCode = 400;
+    throw error;
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    const error = new Error('Malformed JSON request body.');
+    error.statusCode = 400;
+    throw error;
+  }
+}
+
+function isSameOriginDashboardRequest(request, port) {
+  // Browsers send Origin on fetch POST requests. Keep the dashboard's state-changing
+  // operations same-origin so arbitrary websites cannot issue local pet commands.
+  return request.headers.origin === `http://${DEFAULT_HOST}:${port}` &&
+    request.headers.host === `${DEFAULT_HOST}:${port}`;
 }
 
 async function serveStatic(response, route) {
@@ -55,7 +89,7 @@ async function serveStatic(response, route) {
 }
 
 /** Create the loopback-only Sparkiee HTTP API and dashboard server. */
-export function createSparkieeServer({ port, token, startedAt = Date.now(), onShutdown = () => {} }) {
+export function createSparkieeServer({ port, token, startedAt = Date.now(), onShutdown = () => {}, petController = createPetController() }) {
   let shutdownRequested = false;
   const server = createServer(async (request, response) => {
     const host = request.socket.localAddress;
@@ -79,6 +113,30 @@ export function createSparkieeServer({ port, token, startedAt = Date.now(), onSh
     }
     if (method === 'GET' && pathname === '/api/v1/runtime') {
       sendJson(response, 200, toRuntimePayload({ port, startedAt }));
+      return;
+    }
+    if (method === 'GET' && pathname === '/api/v1/pet/state') {
+      if (isAuthorized(request, token)) petController.heartbeat();
+      sendJson(response, 200, petController.snapshot());
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/pet/command') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!isValidPetCommandPayload(payload)) {
+        sendJson(response, 400, { error: 'Invalid pet command payload.' });
+        return;
+      }
+      sendJson(response, 200, { ok: true, pet: petController.command(payload.command) });
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/shutdown') {

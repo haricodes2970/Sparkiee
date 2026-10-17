@@ -68,6 +68,52 @@ test('dashboard files are served with a restrictive content security policy', as
   }
 });
 
+test('pet state can be read publicly but only authorized pet hosts can refresh their heartbeat', async () => {
+  const instance = await startServer();
+  try {
+    const publicResponse = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/state`);
+    assert.equal(publicResponse.status, 200);
+    assert.equal((await publicResponse.json()).hostConnected, false);
+    const hostResponse = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/state`, {
+      headers: { authorization: `Bearer ${instance.token}` },
+    });
+    assert.equal(hostResponse.status, 200);
+    assert.equal((await hostResponse.json()).hostConnected, true);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('dashboard can trigger an animation only from the exact same origin', async () => {
+  const instance = await startServer();
+  try {
+    const denied = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://attacker.example' },
+      body: JSON.stringify({ command: 'dance' }),
+    });
+    assert.equal(denied.status, 403);
+
+    const accepted = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${instance.port}` },
+      body: JSON.stringify({ command: 'dance' }),
+    });
+    assert.equal(accepted.status, 200);
+    const result = await accepted.json();
+    assert.equal(result.pet.animation, 'dance');
+
+    const invalid = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${instance.port}` },
+      body: JSON.stringify({ command: 'execute-shell' }),
+    });
+    assert.equal(invalid.status, 400);
+  } finally {
+    await close(instance.server);
+  }
+});
+
 test('shutdown endpoint requires a valid bearer token', async () => {
   const instance = await startServer();
   try {
