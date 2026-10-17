@@ -13,6 +13,7 @@ let petWindow;
 let pollTimer;
 let lastState = '';
 let latestState = null;
+let dragOrigin = null;
 
 if (process.platform === 'linux' && process.env.SPARKIEE_OZONE_PLATFORM !== 'wayland') {
   // Phase 0 selected XWayland for GNOME because the pet needs window positioning.
@@ -21,6 +22,12 @@ if (process.platform === 'linux' && process.env.SPARKIEE_OZONE_PLATFORM !== 'way
 
 function apiUrl(route) {
   return `http://${HOST}:${PORT}${route}`;
+}
+
+function isPointerPoint(point) {
+  return point && typeof point === 'object' &&
+    Number.isFinite(point.screenX) && Number.isFinite(point.screenY) &&
+    Math.abs(point.screenX) < 100_000 && Math.abs(point.screenY) < 100_000;
 }
 
 async function requestApi(route, options = {}) {
@@ -73,6 +80,19 @@ async function sendCommand(command) {
   return payload.pet;
 }
 
+function movePetFromPointer(point) {
+  if (!dragOrigin || !isPointerPoint(point) || !petWindow || petWindow.isDestroyed()) return;
+  const deltaX = Math.round(point.screenX - dragOrigin.pointerX);
+  const deltaY = Math.round(point.screenY - dragOrigin.pointerY);
+  if (Math.abs(deltaX) < 3 && Math.abs(deltaY) < 3) return;
+  const display = screen.getDisplayMatching(petWindow.getBounds());
+  const area = display.workArea;
+  const [currentX, currentY] = petWindow.getPosition();
+  const targetX = Math.min(Math.max(area.x, dragOrigin.windowX + deltaX), area.x + area.width - petWindow.getBounds().width);
+  const targetY = Math.min(Math.max(area.y, dragOrigin.windowY + deltaY), area.y + area.height - petWindow.getBounds().height);
+  if (targetX !== currentX || targetY !== currentY) petWindow.setPosition(targetX, targetY, false);
+}
+
 function createPetWindow() {
   const { workArea } = screen.getPrimaryDisplay();
   const width = 204;
@@ -118,6 +138,18 @@ function createPetWindow() {
 
 ipcMain.handle('pet:command', async (_event, command) => sendCommand(command));
 ipcMain.handle('pet:get-state', () => latestState);
+ipcMain.on('pet:drag-start', (event, point) => {
+  if (!isPointerPoint(point) || !petWindow || event.sender !== petWindow.webContents) return;
+  const [windowX, windowY] = petWindow.getPosition();
+  dragOrigin = { pointerX: point.screenX, pointerY: point.screenY, windowX, windowY };
+});
+ipcMain.on('pet:drag-move', (event, point) => {
+  if (!petWindow || event.sender !== petWindow.webContents) return;
+  movePetFromPointer(point);
+});
+ipcMain.on('pet:drag-end', (event) => {
+  if (petWindow && event.sender === petWindow.webContents) dragOrigin = null;
+});
 
 app.whenReady().then(async () => {
   if (!TOKEN || !/^[a-f0-9]{64}$/.test(TOKEN)) {
@@ -136,6 +168,9 @@ app.on('before-quit', () => {
   if (pollTimer) clearInterval(pollTimer);
   ipcMain.removeHandler('pet:command');
   ipcMain.removeHandler('pet:get-state');
+  ipcMain.removeAllListeners('pet:drag-start');
+  ipcMain.removeAllListeners('pet:drag-move');
+  ipcMain.removeAllListeners('pet:drag-end');
 });
 
 app.on('window-all-closed', () => app.quit());
