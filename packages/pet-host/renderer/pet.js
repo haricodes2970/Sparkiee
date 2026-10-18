@@ -1,4 +1,5 @@
 import { createAudioEngine } from './lib/audio-engine.mjs';
+import { createCaptionController } from './lib/caption.mjs';
 
 const root = document.querySelector('#pet-root');
 const spriteEl = document.querySelector('#pet-sprite');
@@ -14,10 +15,13 @@ let pointerStart = null;
 let dragged = false;
 let lastVoiceAt = null;
 let lastAnimation = null;
-let captionTimer = null;
 
 const audio = createAudioEngine();
-window.addEventListener('pagehide', () => audio.dispose());
+const caption = createCaptionController({ box: captionBox, text: captionText });
+window.addEventListener('pagehide', () => {
+  audio.dispose();
+  caption.dispose();
+});
 
 // ---------------------------------------------------------------------------
 // Sprite frame player: swaps background-position on a pixelated sheet.
@@ -90,42 +94,24 @@ spriteEl.classList.add('loading');
 // keep working when audio is muted.
 // ---------------------------------------------------------------------------
 
-function captionSettings() {
+function syncCaptionSettings() {
   const captions = currentState?.settings?.captions;
-  return {
+  return caption.setSettings({
     enabled: captions?.enabled !== false,
-    durationMs: Number.isInteger(captions?.durationMs) ? captions.durationMs : (currentPack?.layout?.captionDurationMs ?? 2600),
+    durationMs: Number.isInteger(captions?.durationMs)
+      ? captions.durationMs
+      : (currentPack?.layout?.captionDurationMs ?? undefined),
     large: captions?.large === true,
-  };
+  });
 }
 
 function showCaption(text, { ms = null } = {}) {
-  const settings = captionSettings();
-  captionBox.classList.toggle('large', settings.large);
-  if (!settings.enabled) {
-    captionBox.classList.remove('visible');
-    return;
-  }
-  const value = String(text || '').slice(0, 180);
-  if (captionText.textContent !== value) {
-    captionText.textContent = value;
-    captionBox.classList.remove('caption-bump');
-    void captionBox.offsetWidth; // restart the pop animation
-    captionBox.classList.add('caption-bump');
-  }
-  captionBox.classList.add('visible');
-  if (captionTimer) clearTimeout(captionTimer);
-  const duration = ms ?? settings.durationMs;
-  if (duration > 0) {
-    captionTimer = setTimeout(() => {
-      captionBox.classList.remove('visible');
-      captionTimer = null;
-    }, duration);
-  }
+  syncCaptionSettings();
+  caption.show(text, { ms });
 }
 
-async function reactWithVoice(eventId, caption) {
-  if (caption) showCaption(caption);
+async function reactWithVoice(eventId, captionTextValue) {
+  if (captionTextValue) showCaption(captionTextValue);
   try {
     await audio.playVoice(eventId);
   } catch {
