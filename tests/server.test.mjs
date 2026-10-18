@@ -66,10 +66,10 @@ test('dashboard and all referenced assets are served with a restrictive content 
     assert.match(page.headers.get('content-type'), /text\/html/);
     assert.match(page.headers.get('content-security-policy'), /default-src 'self'/);
     const html = await page.text();
-    assert.match(html, /Sparkiee — Pet Control Centre/);
+    assert.match(html, /Sparkiee — Companion Journal/);
     assert.match(html, /data-pet-command="dance"/);
 
-    for (const [route, type] of [['/src/main.js', /javascript/], ['/src/styles.css', /text\/css/], ['/src/pet-controls.css', /text\/css/]]) {
+    for (const [route, type] of [['/src/main.js', /javascript/], ['/src/styles.css', /text\/css/]]) {
       const asset = await fetch(`http://127.0.0.1:${instance.port}${route}`);
       assert.equal(asset.status, 200, route);
       assert.match(asset.headers.get('content-type'), type);

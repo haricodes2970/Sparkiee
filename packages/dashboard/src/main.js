@@ -51,6 +51,21 @@ const habitatCaption = document.querySelector('#habitat-caption');
 const habitatOwnerText = document.querySelector('#habitat-owner-text');
 const bringToHabitatButton = document.querySelector('#bring-to-habitat');
 const sendToDesktopButton = document.querySelector('#send-to-desktop');
+// Overview: mode strip, now-panel and voice card mirror the same live state.
+const overviewModeBadge = document.querySelector('#overview-mode-badge');
+const overviewModeDetail = document.querySelector('#overview-mode-detail');
+const overviewBringButton = document.querySelector('#overview-bring');
+const overviewSendButton = document.querySelector('#overview-send');
+const overviewAnimation = document.querySelector('#overview-animation');
+const overviewCaption = document.querySelector('#overview-caption');
+const overviewVoiceState = document.querySelector('#overview-voice-state');
+const voiceStat = document.querySelector('#voice-stat');
+const voiceStatCaption = document.querySelector('#voice-stat-caption');
+const charactersGrid = document.querySelector('#characters-grid');
+const settingsPresentationState = document.querySelector('#settings-presentation-state');
+const settingsRestoreButton = document.querySelector('#settings-restore-desktop');
+const breadcrumbCurrent = document.querySelector('#breadcrumb-current');
+const greetingTitle = document.querySelector('#greeting-title');
 const activity = [];
 let lastPetState = null;
 let commandInFlight = false;
@@ -248,12 +263,15 @@ function setHabitatMode(next) {
   habitatSprite.hidden = !owned;
   habitatEmpty.hidden = owned;
   habitatCaption.hidden = !owned;
-  bringToHabitatButton.disabled = next !== 'desktop';
-  sendToDesktopButton.disabled = !owned;
+  for (const button of bringButtons) button.disabled = next !== 'desktop';
+  for (const button of sendButtons) button.disabled = !owned;
   if (!owned) clearHabitatCaption();
   if (next === 'owned') {
     habitatBadge.textContent = 'DASHBOARD MODE · this tab has Sparky';
     habitatOwnerText.textContent = 'Presentation: this dashboard tab';
+    overviewModeBadge.textContent = 'DASHBOARD MODE';
+    overviewModeDetail.textContent = 'This dashboard tab shows the live pet — the native window is hidden.';
+    settingsPresentationState.textContent = 'Mode: dashboard — this tab shows the live pet; the desktop window is hidden.';
     if (previous !== 'owned') {
       recordActivity('presentation', 'Sparky arrived in the dashboard', 'This tab now owns the live pet.');
     }
@@ -264,6 +282,9 @@ function setHabitatMode(next) {
     habitatEmptyTitle.textContent = 'Sparky is wandering on your desktop.';
     habitatEmptyNote.textContent = 'This panel never draws a second pet — bring Sparky here for the live sprite.';
     habitatOwnerText.textContent = 'Presentation: desktop window';
+    overviewModeBadge.textContent = 'DESKTOP MODE';
+    overviewModeDetail.textContent = 'Sparky is in the native desktop window. Bring her here to render the live sprite in this tab.';
+    settingsPresentationState.textContent = 'Mode: desktop — Sparky lives in the native window. The dashboard shows status only.';
     if (previous !== null && previous !== 'desktop') {
       recordActivity('presentation', 'Sparky returned to your desktop', 'The native window shows the live pet again.');
     }
@@ -274,6 +295,9 @@ function setHabitatMode(next) {
     habitatEmptyTitle.textContent = 'Receiving Sparky…';
     habitatEmptyNote.textContent = 'This tab is claiming presentation ownership from the runtime.';
     habitatOwnerText.textContent = 'Presentation: claiming…';
+    overviewModeBadge.textContent = 'HANDING OVER…';
+    overviewModeDetail.textContent = 'Claiming presentation ownership for this tab.';
+    settingsPresentationState.textContent = 'Mode: handing over — this tab is claiming the pet from the runtime.';
     return;
   }
   // 'other-tab'
@@ -281,6 +305,9 @@ function setHabitatMode(next) {
   habitatEmptyTitle.textContent = 'Another dashboard tab has Sparky.';
   habitatEmptyNote.textContent = 'Only one tab shows the live pet. When that tab closes, this one takes over (or Sparky returns to your desktop).';
   habitatOwnerText.textContent = 'Presentation: another dashboard tab';
+  overviewModeBadge.textContent = 'ANOTHER TAB';
+  overviewModeDetail.textContent = 'A different dashboard tab shows the live pet. This tab takes over once that lease ends.';
+  settingsPresentationState.textContent = 'Mode: dashboard — another tab currently shows the live pet.';
 }
 
 async function claimPresentation() {
@@ -383,9 +410,16 @@ function applyPresentation(presentation) {
   setHabitatMode('other-tab');
 }
 
-bringToHabitatButton.addEventListener('click', () => void claimPresentation());
-sendToDesktopButton.addEventListener('click', async () => {
-  sendToDesktopButton.disabled = true;
+// Both surfaces (Overview mode strip + Sparky presentation panel) drive the
+// same claim/release flow — one source of truth, no duplicated logic.
+const bringButtons = [bringToHabitatButton, overviewBringButton];
+const sendButtons = [sendToDesktopButton, overviewSendButton];
+for (const button of bringButtons) {
+  button.addEventListener('click', () => void claimPresentation());
+}
+
+async function releasePresentation() {
+  for (const button of sendButtons) button.disabled = true;
   try {
     const response = await fetch('/api/v1/presentation/release', {
       method: 'POST',
@@ -397,9 +431,34 @@ sendToDesktopButton.addEventListener('click', async () => {
     if (!response.ok) throw new Error(result?.error || `HTTP ${response.status}`);
     applyPetState(result.pet);
   } catch (error) {
-    sendToDesktopButton.disabled = false;
     commandFeedback.className = 'command-feedback error';
     commandFeedback.textContent = error.message || 'Could not hand Sparky back to the desktop.';
+    if (lastPetState) applyPetState(lastPetState); // re-sync button states
+  }
+}
+for (const button of sendButtons) {
+  button.addEventListener('click', () => void releasePresentation());
+}
+
+settingsRestoreButton.addEventListener('click', async () => {
+  settingsRestoreButton.disabled = true;
+  try {
+    // Force restore: no owner check — this is the "give me my window back"
+    // escape hatch, equivalent to the pet host's own transfer path.
+    const response = await fetch('/api/v1/presentation/to-desktop', {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: '{}',
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result?.error || `HTTP ${response.status}`);
+    if (result?.pet) applyPetState(result.pet);
+    settingsPresentationState.textContent = 'Restored — Sparky is back on the desktop window.';
+  } catch (error) {
+    settingsPresentationState.textContent = `Restore failed: ${error.message}`;
+  } finally {
+    settingsRestoreButton.disabled = false;
   }
 });
 
@@ -439,6 +498,14 @@ function applyPetState(state) {
     if (document.activeElement !== speechStyleSelect) speechStyleSelect.value = ['speech', 'chirps', 'both'].includes(state.settings.speech.style) ? state.settings.speech.style : 'speech';
   }
   renderSpeechStatus(state);
+  // Overview "right now" mirrors: latest animation + caption (status text,
+  // same on every surface — ownership only gates the live sprite).
+  overviewAnimation.textContent = state.label || 'Hanging out';
+  overviewCaption.textContent = state.speech?.text
+    ? (state.speech.error
+        ? `${state.speech.text} — voice failed: ${speechErrorText(state.speech.error)}`
+        : state.speech.text)
+    : 'No caption yet — Sparky is saving her voice.';
   // Presentation decides what this tab draws: real sprite only while owned.
   applyPresentation(state.presentation ?? null);
   if ((!habitatPack || habitatPack.id !== state.characterId) && state.characterId) {
@@ -649,14 +716,23 @@ async function refreshVoiceStatus() {
     if (voice.configured) {
       voiceProviderDot.classList.add('voice-provider-ready');
       voiceProviderText.textContent = `ElevenLabs ready · ${voice.voiceId === 'k7uh1RfFIE9Dn75CNvuX' ? 'Sparky default voice' : voice.voiceId} · ${voice.modelId} · ${voice.cacheFiles ?? 0} clips cached`;
+      voiceStat.textContent = 'ElevenLabs ready';
+      voiceStatCaption.textContent = `${voice.voiceId === 'k7uh1RfFIE9Dn75CNvuX' ? 'Sparky default voice' : voice.voiceId} · ${voice.modelId}`;
+      overviewVoiceState.textContent = `ElevenLabs ready · ${voice.cacheFiles ?? 0} clips cached`;
     } else {
       voiceProviderDot.classList.remove('voice-provider-ready');
       voiceProviderText.textContent = 'Not configured — original chirps in use. Run “sparkiee voice setup”.';
+      voiceStat.textContent = 'Original chirps';
+      voiceStatCaption.textContent = 'No ElevenLabs key — run “sparkiee voice setup”';
+      overviewVoiceState.textContent = 'Not configured — original chirps in use.';
     }
     if (voice.lastError) {
       voiceProviderDot.classList.remove('voice-provider-ready');
       voiceProviderDot.classList.add('voice-provider-error');
       voiceProviderText.textContent += ` · ${speechErrorText(voice.lastError)}`;
+      voiceStat.textContent = 'Voice error';
+      voiceStatCaption.textContent = speechErrorText(voice.lastError);
+      overviewVoiceState.textContent = `Last speech failed: ${speechErrorText(voice.lastError)}`;
     } else {
       voiceProviderDot.classList.remove('voice-provider-error');
     }
@@ -665,6 +741,9 @@ async function refreshVoiceStatus() {
     }
   } catch {
     voiceProviderText.textContent = 'Voice status unavailable — is the runtime up?';
+    voiceStat.textContent = 'Unavailable';
+    voiceStatCaption.textContent = 'Could not reach the local runtime';
+    overviewVoiceState.textContent = 'Voice status unavailable — is the runtime up?';
   } finally {
     voiceStatusInFlight = false;
   }
@@ -743,9 +822,70 @@ async function refreshCharacter() {
       option.selected = pack.id === (activeId ?? characterPacks[0]?.id);
       characterSelect.append(option);
     }
+    renderCharacterCards(activeId ?? characterPacks[0]?.id);
   } catch {
     characterNameEl.textContent = 'sparkiee';
     characterMetaEl.textContent = 'Character info unavailable — is the runtime up?';
+    if (charactersGrid) {
+      charactersGrid.replaceChildren();
+      const error = document.createElement('div');
+      error.className = 'activity-empty';
+      error.textContent = 'Character packs unavailable — is the runtime up?';
+      charactersGrid.append(error);
+    }
+  }
+}
+
+// Characters view: browse every discovered pack and activate one. Real data
+// straight from the validated manifests — never hardcoded art.
+function renderCharacterCards(activeId) {
+  if (!charactersGrid) return;
+  charactersGrid.replaceChildren();
+  if (characterPacks.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'activity-empty';
+    empty.textContent = 'No valid character pack found — check docs/ASSET_CREDITS.md.';
+    charactersGrid.append(empty);
+    return;
+  }
+  for (const pack of characterPacks) {
+    const card = document.createElement('article');
+    card.className = 'character-pack-card';
+    if (pack.id === activeId) card.classList.add('pack-active');
+    const top = document.createElement('div');
+    top.className = 'pack-card-top';
+    const name = document.createElement('strong');
+    name.textContent = pack.name || pack.id;
+    top.append(name);
+    if (pack.id === activeId) {
+      const tag = document.createElement('span');
+      tag.className = 'pack-active-tag';
+      tag.textContent = 'ACTIVE';
+      top.append(tag);
+    }
+    const description = document.createElement('p');
+    description.textContent = pack.description || 'No description in the manifest.';
+    const meta = document.createElement('div');
+    meta.className = 'pack-meta';
+    const license = pack.license?.type ? ` · ${pack.license.type}` : '';
+    meta.textContent = `v${pack.version || '1.0.0'}${license} · ${pack.animationCount || 13} animations · ${pack.voiceStyle === 'clips' ? 'clip voice' : 'synthesized voice'}`;
+    card.append(top, description, meta);
+    if (pack.id !== activeId) {
+      const activate = document.createElement('button');
+      activate.type = 'button';
+      activate.className = 'secondary-action';
+      activate.textContent = 'Make active';
+      activate.addEventListener('click', () => {
+        activate.disabled = true;
+        void sendSettings({ characterId: pack.id }, `Character pack switched to ${pack.name || pack.id}.`)
+          .finally(() => {
+            characterSelect.value = pack.id;
+            void refreshCharacter();
+          });
+      });
+      card.append(activate);
+    }
+    charactersGrid.append(card);
   }
 }
 
@@ -753,6 +893,42 @@ for (const button of commandButtons) {
   button.addEventListener('click', () => void sendPetCommand(button.dataset.petCommand));
 }
 retryHostButton.addEventListener('click', () => void retryHostLaunch());
+
+// ---------------------------------------------------------------------------
+// View router: hash-based sidebar navigation. The nav items are plain links,
+// so keyboard navigation, focus and back/forward come for free. Unknown
+// hashes (old bookmarks like #pet-controls) fall back to Overview.
+// ---------------------------------------------------------------------------
+
+const VIEW_TITLES = { overview: 'Overview', sparky: 'Sparky', characters: 'Characters', settings: 'Settings' };
+const viewSections = document.querySelectorAll('[data-view]');
+const viewLinks = document.querySelectorAll('[data-view-link]');
+
+function showView(name) {
+  const view = name in VIEW_TITLES ? name : 'overview';
+  for (const section of viewSections) section.hidden = section.dataset.view !== view;
+  for (const link of viewLinks) {
+    const active = link.dataset.viewLink === view;
+    link.classList.toggle('active', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+  breadcrumbCurrent.textContent = VIEW_TITLES[view];
+  window.scrollTo({ top: 0, behavior: 'auto' });
+}
+
+function viewFromHash() {
+  return decodeURIComponent(window.location.hash.replace(/^#/, '')) || 'overview';
+}
+
+window.addEventListener('hashchange', () => showView(viewFromHash()));
+showView(viewFromHash());
+
+{
+  const hour = new Date().getHours();
+  const part = hour < 12 ? 'morning' : hour < 18 ? 'afternoon' : 'evening';
+  greetingTitle.textContent = `Good ${part}, Sparky.`;
+}
 
 void refreshRuntime();
 void refreshPet();

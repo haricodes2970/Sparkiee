@@ -71,7 +71,7 @@ test('CLI starts the daemon, serves the dashboard, reports status, and stops cle
 
     const pageResponse = await fetch(`http://127.0.0.1:${port}/`);
     assert.equal(pageResponse.status, 200);
-    assert.match(await pageResponse.text(), /Say hi to Sparkiee/);
+    assert.match(await pageResponse.text(), /Say hi to Sparky/);
 
     const status = await runCli(['status'], env);
     assert.equal(status.code, 0, status.stderr);

@@ -15,7 +15,6 @@ const STATIC_FILES = new Map([
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
   ['/src/main.js', ['src/main.js', 'text/javascript; charset=utf-8']],
   ['/src/styles.css', ['src/styles.css', 'text/css; charset=utf-8']],
-  ['/src/pet-controls.css', ['src/pet-controls.css', 'text/css; charset=utf-8']],
 ]);
 // Browser-safe renderer modules the dashboard imports directly from the
 // pet renderer library — one frame player, one policy set, one caption
