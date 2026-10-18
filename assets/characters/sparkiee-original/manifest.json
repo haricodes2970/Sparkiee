@@ -1,0 +1,56 @@
+{
+  "id": "sparkiee-original",
+  "name": "Sparkiee",
+  "version": "1.0.0",
+  "description": "Original golden electric companion: a round pixel creature with a curled teal tuft and swirl tail. All art and voice cues are original works created for Sparkiee.",
+  "license": {
+    "type": "MIT",
+    "author": "Sparkiee project",
+    "notes": "Artwork generated procedurally by scripts/generate-sprites.mjs; voice cues are synthesized at runtime. No third-party assets. See docs/ASSET_CREDITS.md.",
+    "commercialRedistribution": true,
+    "attributionRequired": false
+  },
+  "spriteSheet": {
+    "file": "sprites/sheet.png",
+    "frameWidth": 32,
+    "frameHeight": 32,
+    "columns": 8
+  },
+  "animations": {
+    "idle": { "frames": [0, 1, 2, 3], "frameMs": 320, "loop": true },
+    "wave": { "frames": [4, 5, 6, 7], "frameMs": 180, "loop": false },
+    "walk": { "frames": [8, 9, 10, 11, 12, 13], "frameMs": 130, "loop": true },
+    "run": { "frames": [14, 15, 16, 17, 18, 19], "frameMs": 90, "loop": true },
+    "dance": { "frames": [20, 21, 22, 23, 24, 25], "frameMs": 140, "loop": true },
+    "sleep": { "frames": [26, 27, 28, 29], "frameMs": 500, "loop": true },
+    "surprised": { "frames": [30, 31], "frameMs": 200, "loop": false },
+    "confused": { "frames": [32, 33, 34], "frameMs": 240, "loop": false },
+    "thinking": { "frames": [35, 36, 37], "frameMs": 300, "loop": true },
+    "celebrate": { "frames": [38, 39, 40, 41, 42, 43], "frameMs": 120, "loop": false },
+    "task_complete": { "frames": [44, 45, 46, 47, 48, 49], "frameMs": 130, "loop": false },
+    "task_error": { "frames": [50, 51, 52], "frameMs": 300, "loop": false },
+    "permission_required": { "frames": [53, 54, 55], "frameMs": 260, "loop": false }
+  },
+  "voice": {
+    "style": "synth",
+    "events": {
+      "greet": { "caption": "Spi-spi!", "baseFrequency": 620, "endFrequency": 880, "durationMs": 220, "waveform": "triangle", "chirps": 2, "cooldownMs": 1200 },
+      "attention": { "caption": "Spi?", "baseFrequency": 700, "endFrequency": 990, "durationMs": 150, "waveform": "triangle", "chirps": 1, "cooldownMs": 1500 },
+      "excitement": { "caption": "Spiiii!", "baseFrequency": 560, "endFrequency": 1150, "durationMs": 300, "waveform": "square", "chirps": 3, "cooldownMs": 1500 },
+      "celebration": { "caption": "Spi-la-chu!", "baseFrequency": 660, "endFrequency": 990, "durationMs": 380, "waveform": "triangle", "chirps": 3, "cooldownMs": 2000 },
+      "waiting": { "caption": "Spi?", "baseFrequency": 520, "endFrequency": 480, "durationMs": 160, "waveform": "sine", "chirps": 1, "cooldownMs": 4000 },
+      "error": { "caption": "Spi...?", "baseFrequency": 640, "endFrequency": 380, "durationMs": 320, "waveform": "sine", "chirps": 1, "cooldownMs": 2000 },
+      "return": { "caption": "I'm back!", "baseFrequency": 580, "endFrequency": 920, "durationMs": 240, "waveform": "triangle", "chirps": 2, "cooldownMs": 1500 },
+      "confused": { "caption": "Spi-ku?", "baseFrequency": 700, "endFrequency": 520, "durationMs": 260, "waveform": "sine", "chirps": 2, "cooldownMs": 2000 },
+      "think": { "caption": "Mm-spi...", "baseFrequency": 480, "endFrequency": 560, "durationMs": 200, "waveform": "sine", "chirps": 1, "cooldownMs": 3000 },
+      "groove": { "caption": "La-la-spi!", "baseFrequency": 560, "endFrequency": 720, "durationMs": 280, "waveform": "square", "chirps": 2, "cooldownMs": 2500 }
+    }
+  },
+  "layout": {
+    "windowWidth": 220,
+    "windowHeight": 300,
+    "spriteScale": 4,
+    "captionDurationMs": 2600,
+    "captionMaxLines": 2
+  }
+}
