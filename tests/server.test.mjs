@@ -627,34 +627,43 @@ function playbackStub(overrides = {}) {
     engine: { backend: 'cvlc', available: true, detail: null },
     lastError: null,
   };
+  // Stateful so status mirrors prior transport calls, like the real player.
+  const state = { ...playing, phase: 'stopped', track: null, positionMs: 0 };
+  const snapshot = () => ({ ...state });
+  const setPhase = (phase, extra = {}) => {
+    Object.assign(state, { phase }, extra);
+    return snapshot();
+  };
   return {
     status: () => ({ trackCount: 19, formats: ['mp3'], roots: [{ path: '/home/hari007/Music', available: true }], scannedAt: 'x', rescanInFlight: false, lastError: null }),
     list: async () => ({ tracks: [], total: 0, query: '' }),
     rescan: async () => ({ trackCount: 19 }),
-    playbackStatus: () => ({ ...playing, phase: 'stopped' }),
+    playbackStatus: snapshot,
     play: async ({ trackId }) => {
       if (!/^[0-9a-f]{16}$/.test(trackId)) {
         const error = new Error('trackId must be an opaque 16-character library id.');
         error.code = 'INVALID_TRACK';
         throw error;
       }
-      if (trackId === 'a1b2c3d4e5f60718') return playing;
-      const error = new Error('That track is not in the library (it may have been removed).');
-      error.code = 'TRACK_NOT_FOUND';
-      throw error;
+      if (trackId !== 'a1b2c3d4e5f60718') {
+        const error = new Error('That track is not in the library (it may have been removed).');
+        error.code = 'TRACK_NOT_FOUND';
+        throw error;
+      }
+      return setPhase('playing', { track: playing.track, positionMs: 0 });
     },
-    pause: async () => ({ ...playing, phase: 'paused' }),
-    resume: async () => playing,
-    stop: async () => ({ ...playing, phase: 'stopped', track: null, positionMs: 0 }),
-    next: async () => playing,
-    previous: async () => playing,
+    pause: async () => setPhase('paused'),
+    resume: async () => setPhase('playing'),
+    stop: async () => setPhase('stopped', { track: null, positionMs: 0 }),
+    next: async () => setPhase('playing'),
+    previous: async () => setPhase('playing'),
     updateSettings: async (payload) => {
       if (payload.volume !== undefined && (payload.volume < 0 || payload.volume > 1)) {
         const error = new Error('volume must be a number between 0 and 1.');
         error.code = 'INVALID_VOLUME';
         throw error;
       }
-      return { ...playing, ...payload };
+      return Object.assign(state, payload) && snapshot();
     },
     ...overrides,
   };
@@ -769,5 +778,147 @@ test('music status includes an honest playback block and 503s without a player',
   } finally {
     await close(withPlayer.server);
     await close(withoutPlayer.server);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Assistant command endpoint: deterministic routing, gated spend, honest 503.
+// ---------------------------------------------------------------------------
+
+function assistantServiceStub() {
+  const base = playbackStub();
+  return {
+    ...base,
+    searchRanked: async (query) => {
+      const normalized = String(query ?? '').toLowerCase();
+      if (normalized.includes('madira')) {
+        return [{
+          id: 'a1b2c3d4e5f60718',
+          name: 'Madira',
+          title: 'Madira',
+          artist: null,
+          album: null,
+          durationMs: 169_846,
+          sizeBytes: 5_587_341,
+          file: 'Madira.mp3',
+          available: true,
+          tier: 'exact',
+        }];
+      }
+      if (normalized.includes('ghost-song')) {
+        return [{
+          id: 'a1b2c3d4e5f60718',
+          name: 'Ghost Song',
+          title: null,
+          artist: null,
+          album: null,
+          durationMs: null,
+          sizeBytes: 1,
+          file: 'Ghost Song.mp3',
+          available: false,
+          tier: 'exact',
+        }];
+      }
+      return [];
+    },
+  };
+}
+
+test('assistant command routes recognised text and stays truthful when unhandled', async () => {
+  const instance = await startServer({
+    musicService: assistantServiceStub(),
+    assistantThrottleMs: 0,
+  });
+  try {
+    const post = (body, headers = {}) => fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    });
+
+    const authed = { authorization: `Bearer ${instance.token}` };
+    assert.equal((await post({}, authed)).status, 400);
+    assert.equal((await post({ text: 42 }, authed)).status, 400);
+    assert.equal((await post({ text: 'x'.repeat(301) }, authed)).status, 400);
+    assert.equal((await post({ text: 'play Madira' })).status, 403, 'no auth');
+
+    const unauthorized = await post(
+      { text: 'play Madira' },
+      { authorization: `Bearer ${instance.token}` },
+    );
+    assert.equal(unauthorized.status, 200);
+
+    const unhandled = await post(
+      { text: 'open vscode' },
+      { authorization: `Bearer ${instance.token}` },
+    );
+    const unhandledBody = await unhandled.json();
+    assert.equal(unhandledBody.handled, false);
+    assert.equal(unhandledBody.speech, null, 'no TTS spend on unrecognised text');
+
+    const played = await post(
+      { text: 'Yo Spark, play Madira.' },
+      { authorization: `Bearer ${instance.token}` },
+    );
+    const playedBody = await played.json();
+    assert.equal(playedBody.handled, true);
+    assert.equal(playedBody.executed, true);
+    assert.equal(playedBody.reply, 'Okay! Playing Madira.');
+    assert.equal(playedBody.playback.phase, 'playing');
+    assert.equal(playedBody.speech, null, 'no voice configured → no claim of speech');
+
+    const missing = await post(
+      { text: 'play ghost-song' },
+      { authorization: `Bearer ${instance.token}` },
+    );
+    const missingBody = await missing.json();
+    assert.equal(missingBody.executed, false);
+    assert.match(missingBody.reply, /file is missing/);
+    assert.equal(missingBody.playback.phase, 'playing', 'failed play leaves prior state honest');
+
+    const volume = await post(
+      { text: 'set music volume to 150 percent' },
+      { authorization: `Bearer ${instance.token}` },
+    );
+    const volumeBody = await volume.json();
+    assert.equal(volumeBody.executed, false);
+    assert.equal(volumeBody.reply, 'Volume must be between 0 and 100 percent.');
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('assistant commands are throttled and 503 without a music service', async () => {
+  const throttled = await startServer({ musicService: assistantServiceStub() });
+  const bare = await startServer();
+  const headers = (port) => ({
+    'content-type': 'application/json',
+    authorization: `Bearer ${'c'.repeat(64)}`,
+    origin: `http://127.0.0.1:${port}`,
+    host: `127.0.0.1:${port}`,
+  });
+  try {
+    const first = await fetch(`http://127.0.0.1:${throttled.port}/api/v1/assistant/command`, {
+      method: 'POST',
+      headers: headers(throttled.port),
+      body: JSON.stringify({ text: 'what song is playing' }),
+    });
+    assert.equal(first.status, 200);
+    const second = await fetch(`http://127.0.0.1:${throttled.port}/api/v1/assistant/command`, {
+      method: 'POST',
+      headers: headers(throttled.port),
+      body: JSON.stringify({ text: 'pause' }),
+    });
+    assert.equal(second.status, 429, 'stampede guard on command + TTS spend');
+
+    const noService = await fetch(`http://127.0.0.1:${bare.port}/api/v1/assistant/command`, {
+      method: 'POST',
+      headers: headers(bare.port),
+      body: JSON.stringify({ text: 'play Madira' }),
+    });
+    assert.equal(noService.status, 503);
+  } finally {
+    await close(throttled.server);
+    await close(bare.server);
   }
 });

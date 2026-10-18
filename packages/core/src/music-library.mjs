@@ -34,7 +34,7 @@ export const MUSIC_FORMATS = Object.freeze(['mp3']);
 const MAX_FILENAME_STEM = 120;
 
 /** Words stripped from the token tier so "the madira" still matches "Madira". */
-const SEARCH_FILLER_WORDS = new Set(['the', 'a', 'an', 'my', 'that', 'this', 'song', 'track', 'by']);
+export const SEARCH_FILLER_WORDS = new Set(['the', 'a', 'an', 'my', 'that', 'this', 'song', 'track', 'by']);
 
 function musicError(code, message) {
   const error = new Error(message);
@@ -89,6 +89,14 @@ function editDistance(a, b, cap = 3) {
     previous = row;
   }
   return previous[b.length];
+}
+
+/** Map a ranking score to the safety tier voice routing depends on. */
+function tierForScore(score) {
+  if (score >= 100) return 'exact';
+  if (score >= 60) return 'strong';
+  if (score >= 40) return 'tokens';
+  return 'fuzzy';
 }
 
 function trackIdFor(relativePath) {
@@ -363,20 +371,33 @@ export function createMusicLibrary({
       const ranked = querySearchTracks(query);
       const slice = ranked.slice(0, cappedLimit);
       const records = await Promise.all(
-        slice.map(async (track) => publicRecord(track, await trackAvailable(track))),
+        slice.map(async ({ track }) => publicRecord(track, await trackAvailable(track))),
       );
       return { tracks: records, total: ranked.length, query: String(query ?? '') };
     },
     /**
-     * Ranked search over titles, filenames and metadata.
-     * Tiers: exact title/filename → prefix/word-boundary → all-tokens
-     * contained → near-miss suggestions (edit distance) when nothing matches.
+     * Ranked search over titles, filenames and metadata (sync convenience;
+     * availability is not stat-checked here → reported as null/unknown).
+     * Tiers live in searchRanked, which stats and labels each match.
      */
     search(query, { limit = 10 } = {}) {
-      const matches = querySearchTracks(query)
+      return querySearchTracks(query)
         .slice(0, Math.min(50, Math.max(1, Math.trunc(Number(limit) || 10))))
-        .map((track) => publicRecord(track, true));
-      return matches;
+        .map(({ track }) => publicRecord(track, null));
+    },
+    /**
+     * Tiered search with live availability — the safe input to play routing.
+     * tier: 'exact' (title/filename equals the query) → 'strong' (prefix or
+     * substring hit) → 'tokens' (all content words present) → 'fuzzy'
+     * (near-miss suggestion only — never auto-played).
+     */
+    async searchRanked(query, { limit = 10 } = {}) {
+      const capped = Math.min(50, Math.max(1, Math.trunc(Number(limit) || 10)));
+      const entries = querySearchTracks(query).slice(0, capped);
+      return Promise.all(entries.map(async ({ track, score }) => ({
+        ...publicRecord(track, await trackAvailable(track)),
+        tier: tierForScore(score),
+      })));
     },
     /** Internal: resolve an opaque id to a validated absolute path. */
     async resolvePath(trackId) {
@@ -401,7 +422,7 @@ export function createMusicLibrary({
   /** Ranking engine, closed over `tracks` (refreshed by scan). */
   function querySearchTracks(rawQuery) {
     const query = normalizeForMatch(rawQuery);
-    if (!query) return tracks;
+    if (!query) return tracks.map((track) => ({ track, score: 100 }));
     const queryTokens = query.split(' ').filter(Boolean);
     const contentTokens = queryTokens.filter((token) => !SEARCH_FILLER_WORDS.has(token));
     const effectiveTokens = contentTokens.length > 0 ? contentTokens : queryTokens;
@@ -419,9 +440,10 @@ export function createMusicLibrary({
     }
     if (scored.length > 0) {
       scored.sort((a, b) => b.score - a.score || a.track.relativePath.localeCompare(b.track.relativePath));
-      return scored.map((entry) => entry.track);
+      return scored;
     }
     // Near-miss suggestions: single content-token queries, small edit distance.
+    // Score 0 marks them fuzzy — safe to OFFER, never safe to auto-play.
     if (effectiveTokens.length === 1) {
       const token = effectiveTokens[0];
       const suggestions = [];
@@ -434,7 +456,7 @@ export function createMusicLibrary({
         }
       }
       suggestions.sort((a, b) => a.distance - b.distance);
-      return suggestions.map((entry) => entry.track);
+      return suggestions.map((entry) => ({ track: entry.track, score: 0 }));
     }
     return [];
   }

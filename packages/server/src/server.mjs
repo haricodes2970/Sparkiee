@@ -7,6 +7,7 @@ import { isAuthorized, toRuntimePayload, DEFAULT_HOST } from '../../core/src/ind
 import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayload, isValidPresentationClaimPayload, isValidPresentationReleasePayload } from '../../core/src/pet-state.mjs';
 import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
+import { parseMusicIntent, runMusicCommand } from '../../core/src/music-commands.mjs';
 
 const DASHBOARD_ROOT = fileURLToPath(new URL('../../dashboard/', import.meta.url));
 const SHARED_LIB_ROOT = fileURLToPath(new URL('../../pet-host/renderer/lib/', import.meta.url));
@@ -139,10 +140,14 @@ export function createSparkieeServer({
   agentNow = () => Date.now(),
   agentEventDedupMs = AGENT_EVENT_DEDUP_MS,
   agentEventCooldownMs = AGENT_EVENT_COOLDOWN_MS,
+  assistantThrottleMs = 400,
+  assistantSpeechRateMax = 8,
 }) {
   let shutdownRequested = false;
   const commandSpeechSpokeAt = new Map(); // voiceEvent -> timestamp
   const agentEventSeen = new Map(); // `${sessionId}:${event}` -> timestamp
+  let lastAssistantCommandAt = 0;
+  const assistantSpeechTimes = []; // rolling window for TTS rate limiting
 
   /**
    * Command reactions may speak a predefined line when spoken voice is
@@ -164,6 +169,25 @@ export function createSparkieeServer({
     } catch {
       // Speech is best-effort: the animation and chirp reaction already happened.
     }
+  }
+
+  /** Same bar as command speech: configured, enabled, ElevenLabs, not chirps. */
+  function canSpeakAssistant() {
+    if (!voiceService || !isVoiceReady()) return false;
+    const speech = petController.snapshot()?.settings?.speech;
+    return Boolean(speech) && speech.enabled !== false
+      && speech.provider === 'elevenlabs' && speech.style !== 'chirps';
+  }
+
+  /** Within the rolling TTS budget for user-triggered assistant replies? */
+  function assistantSpeechAllowed() {
+    const now = Date.now();
+    while (assistantSpeechTimes.length > 0 && now - assistantSpeechTimes[0] > 60_000) {
+      assistantSpeechTimes.shift();
+    }
+    if (assistantSpeechTimes.length >= assistantSpeechRateMax) return false;
+    assistantSpeechTimes.push(now);
+    return true;
   }
   const server = createServer(async (request, response) => {
     const host = request.socket.localAddress;
@@ -580,6 +604,104 @@ export function createSparkieeServer({
       } catch {
         sendJson(response, 404, { error: 'Sprite sheet unavailable.' });
       }
+      return;
+    }
+    // -------------------------------------------------------------------------
+    // Assistant: deterministic text-command routing (music first). Auth-gated
+    // because commands change player state and may spend TTS credits. The
+    // recognised text never leaves this process — no AI provider is involved.
+    // -------------------------------------------------------------------------
+    if (method === 'POST' && pathname === '/api/v1/assistant/command') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!musicService) {
+        sendJson(response, 503, { error: 'Assistant unavailable: no music service is attached.' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!payload || typeof payload.text !== 'string' || payload.text.trim().length < 1 || payload.text.length > 300) {
+        sendJson(response, 400, { error: 'Expected { text: string } of 1-300 characters.' });
+        return;
+      }
+      const now = Date.now();
+      if (now - lastAssistantCommandAt < assistantThrottleMs) {
+        sendJson(response, 429, { error: 'Commands are arriving too fast. Slow down a moment.' });
+        return;
+      }
+      lastAssistantCommandAt = now;
+
+      const intent = parseMusicIntent(payload.text);
+      if (!intent) {
+        // Unhandled text: answer honestly in JSON without spending TTS.
+        sendJson(response, 200, {
+          ok: true,
+          handled: false,
+          intent: null,
+          reply: 'I did not catch a music command. Try: play, pause, resume, stop, next, previous, volume, shuffle, find, or what is playing.',
+          speech: null,
+          playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
+        });
+        return;
+      }
+
+      let result;
+      try {
+        result = await runMusicCommand(intent, {
+          player: {
+            play: (options) => musicService.play(options),
+            pause: () => musicService.pause(),
+            resume: () => musicService.resume(),
+            stop: () => musicService.stop(),
+            next: () => musicService.next(),
+            previous: () => musicService.previous(),
+            updateSettings: (partial) => musicService.updateSettings(partial),
+            status: () => musicService.playbackStatus(),
+          },
+          searchRanked: (query, options) => musicService.searchRanked(query, options),
+        });
+      } catch (error) {
+        sendJson(response, 500, { error: error?.message ?? 'Assistant command failed.' });
+        return;
+      }
+
+      // Speak only confirmed, meaningful replies — and only inside the voice
+      // preference gate plus the rolling TTS budget. The music ducks while a
+      // real clip plays, then the player restores its own level.
+      let speech = null;
+      if (result.reply && canSpeakAssistant() && assistantSpeechAllowed()) {
+        try {
+          const snapshot = await voiceService.speak(result.reply, { source: 'assistant' });
+          speech = snapshot.speech ?? null;
+          if (speech?.clipId && musicService.duckForSpeech) {
+            const estimateMs = Math.min(7000, 700 + result.reply.length * 65);
+            musicService.duckForSpeech(estimateMs);
+          }
+        } catch {
+          speech = null; // the JSON reply above remains truthful either way
+        }
+      }
+
+      sendJson(response, 200, {
+        ok: true,
+        handled: true,
+        intent: intent.intent,
+        reply: result.reply,
+        executed: Boolean(result.executed),
+        speech,
+        candidates: result.candidates ?? undefined,
+        matches: result.matches ?? undefined,
+        suggestions: result.suggestions ?? undefined,
+        track: result.track ?? undefined,
+        playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
+      });
       return;
     }
     // -------------------------------------------------------------------------

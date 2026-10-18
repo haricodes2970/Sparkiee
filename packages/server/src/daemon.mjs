@@ -313,6 +313,8 @@ async function main() {
       list: (options) => musicLibrary.list(options),
       rescan: (options) => musicLibrary.rescan(options),
       playbackStatus: () => musicPlayerRuntime.status(),
+      searchRanked: (query, options) => musicLibrary.searchRanked(query, options),
+      duckForSpeech: (durationMs) => musicPlayerRuntime.duck({ durationMs }),
       play: (options) => musicPlayerRuntime.play(options),
       pause: () => musicPlayerRuntime.pause(),
       resume: () => musicPlayerRuntime.resume(),
