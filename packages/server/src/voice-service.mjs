@@ -15,7 +15,7 @@
  *   can explain what went wrong. The API key never leaves this process.
  */
 
-import { synthesisCacheKey } from '../../core/src/voice-config.mjs';
+import { synthesisCacheKey, mimeForOutputFormat } from '../../core/src/voice-config.mjs';
 import { isValidUtterance, MAX_UTTERANCE_LENGTH } from '../../core/src/tts-client.mjs';
 import { pickLine, VOICE_TEST_PHRASE } from '../../core/src/voice-lines.mjs';
 
@@ -186,6 +186,21 @@ export function createVoiceService({
         lastSpokenAt: lastSpokenAt > 0 ? new Date(lastSpokenAt).toISOString() : null,
         maxSpeechLength,
       };
+    },
+    /**
+     * Fetch a cached clip for delivery to the pet host. The key must be a
+     * sha256 hex digest; anything else is reported as invalid without
+     * touching the filesystem.
+     */
+    async getClip(key) {
+      if (typeof key !== 'string' || !/^[a-f0-9]{64}$/.test(key)) return { status: 'invalid' };
+      try {
+        const audio = await cache.get(key);
+        if (!audio) return { status: 'missing' };
+        return { status: 'ok', audio, mime: mimeForOutputFormat(getConfig().config.outputFormat) };
+      } catch {
+        return { status: 'missing' };
+      }
     },
     /** Clear the clip cache (dashboard/CLI maintenance). */
     async clearCache() {

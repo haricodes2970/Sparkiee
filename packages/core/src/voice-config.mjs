@@ -208,6 +208,18 @@ export function describeVoiceConfig(loaded) {
 }
 
 /**
+ * Content type for a generated clip, derived from the output format.
+ */
+export function mimeForOutputFormat(format) {
+  const value = typeof format === 'string' ? format : '';
+  if (value.startsWith('mp3_')) return 'audio/mpeg';
+  if (value.startsWith('opus_')) return 'audio/ogg';
+  if (value.startsWith('wav_')) return 'audio/wav';
+  if (value.startsWith('pcm_')) return 'application/octet-stream';
+  return 'audio/mpeg';
+}
+
+/**
  * Stable cache key for a synthesis request: text + voice + model + format
  * + voice settings. Only hex characters, so it is path-safe by
  * construction.

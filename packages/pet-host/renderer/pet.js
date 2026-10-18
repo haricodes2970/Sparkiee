@@ -1,5 +1,6 @@
 import { createAudioEngine } from './lib/audio-engine.mjs';
 import { createCaptionController } from './lib/caption.mjs';
+import { shouldFallbackChirp, shouldPlayEventChirp, speechCaptionDuration } from './lib/speech-policy.mjs';
 
 const root = document.querySelector('#pet-root');
 const spriteEl = document.querySelector('#pet-sprite');
@@ -15,6 +16,10 @@ let pointerStart = null;
 let dragged = false;
 let lastVoiceAt = null;
 let lastAnimation = null;
+let lastSpeechId = 0;
+let speechElement = null;
+let speechCaptionUntil = 0;
+let eventChirpSuppressedAt = 0;
 
 const audio = createAudioEngine();
 const caption = createCaptionController({ box: captionBox, text: captionText });
@@ -120,6 +125,97 @@ async function reactWithVoice(eventId, captionTextValue) {
 }
 
 // ---------------------------------------------------------------------------
+// Spoken voice: plays a generated clip delivered by the Electron main
+// process, keeps the subtitle synced for the whole utterance, and falls
+// back to a chirp only where speech failed. Muted mode keeps captions.
+// ---------------------------------------------------------------------------
+
+function stopSpeechAudio() {
+  if (!speechElement) return;
+  try {
+    speechElement.pause();
+    speechElement.removeAttribute('src');
+  } catch {
+    // element may already be released
+  }
+  speechElement = null;
+}
+
+function playSpeechClip(dataUrl) {
+  stopSpeechAudio();
+  const element = new Audio(dataUrl);
+  const volume = currentState?.settings?.audio?.volume;
+  element.volume = Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 0.7;
+  speechElement = element;
+  // Spoken words must not be drowned out by a chirp that is still ringing.
+  audio.stopAll();
+  return new Promise((resolve) => {
+    let settled = false;
+    let watchdog = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      if (watchdog !== null) clearTimeout(watchdog);
+      resolve(value);
+    };
+    element.addEventListener(
+      'loadedmetadata',
+      () => finish(Number.isFinite(element.duration) ? element.duration : null),
+      { once: true },
+    );
+    element.addEventListener('error', () => finish(null), { once: true });
+    watchdog = setTimeout(() => finish(Number.isFinite(element.duration) ? element.duration : null), 900);
+    element.play().catch(() => finish(null));
+  });
+}
+
+async function fallbackChirpFor(speech) {
+  const packEvents = currentPack?.voiceEvents ?? {};
+  const commandMap = currentPack?.commandVoiceEvents ?? {};
+  const eventId = (speech.voiceEvent && packEvents[speech.voiceEvent])
+    || commandMap[currentState?.animation]
+    || null;
+  if (!eventId || !packEvents[eventId]) return;
+  try {
+    await audio.playVoice(eventId);
+  } catch {
+    // Best-effort.
+  }
+}
+
+async function handleSpeech(speech) {
+  const text = String(speech.text).slice(0, 180);
+  syncCaptionSettings();
+  const configuredMs = caption.getSettings().durationMs;
+  // The subtitle appears the moment the phrase is ready...
+  showCaption(text, { ms: configuredMs });
+  speechCaptionUntil = Date.now() + configuredMs;
+
+  const audioSettings = currentState?.settings?.audio ?? {};
+  const muted = audioSettings.enabled === false;
+  let played = false;
+  if (speech.dataUrl && !muted) {
+    const durationSeconds = await playSpeechClip(speech.dataUrl);
+    played = durationSeconds !== null;
+    if (played) {
+      const ms = speechCaptionDuration({ audioDurationSeconds: durationSeconds, configuredMs });
+      // ...and then tracks the real speech length (same text: timer only,
+      // no flicker).
+      showCaption(text, { ms });
+      speechCaptionUntil = Date.now() + ms;
+      return;
+    }
+    stopSpeechAudio(); // release the element that failed to play
+  }
+  // Honest fallback: speech failed (generation or playback), so the chirp
+  // returns where it was suppressed, or for an explicit test click.
+  const failure = played ? null : { ...speech, error: speech.error || 'playback_failed' };
+  if (failure && shouldFallbackChirp(failure, { suppressedAt: eventChirpSuppressedAt, now: Date.now() })) {
+    await fallbackChirpFor(speech);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // State application
 // ---------------------------------------------------------------------------
 
@@ -137,14 +233,16 @@ function applyState(state) {
   const animation = currentPack?.animations?.[state.animation] ? state.animation : 'idle';
   if (currentPack) spritePlayer.play(currentPack, animation);
 
-  // Default caption follows the state message.
-  showCaption(state.message || '');
+  // Default caption follows the state message, but an active spoken phrase
+  // keeps the floor until its caption window ends.
+  if (Date.now() >= speechCaptionUntil) showCaption(state.message || '');
 
   // Voice reactions fire when the animation changes or an explicit voice
   // trigger arrives (for example the dashboard test-sound button).
   const packEvents = currentPack?.voiceEvents ?? {};
   const commandMap = currentPack?.commandVoiceEvents ?? {};
   if (state.voice && state.voice.at && state.voice.at !== lastVoiceAt) {
+    // Explicit chirp triggers always sound: the user asked for a chirp.
     lastVoiceAt = state.voice.at;
     if (packEvents[state.voice.event]) {
       void reactWithVoice(state.voice.event, packEvents[state.voice.event]?.caption);
@@ -152,7 +250,14 @@ function applyState(state) {
   } else if (currentPack && state.animation !== lastAnimation) {
     const eventId = commandMap[state.animation];
     if (eventId && packEvents[eventId]) {
-      void reactWithVoice(eventId, packEvents[eventId]?.caption);
+      if (packEvents[eventId]?.caption) showCaption(packEvents[eventId].caption);
+      if (shouldPlayEventChirp(currentState)) {
+        void audio.playVoice(eventId).catch(() => {});
+      } else {
+        // Spoken voice carries this reaction; remember the suppression so
+        // a failed announcement can restore the chirp.
+        eventChirpSuppressedAt = Date.now();
+      }
     }
   }
   lastAnimation = state.animation;
@@ -212,3 +317,10 @@ petButton.addEventListener('click', () => {
 
 window.sparkieePet.onState(applyState);
 window.sparkieePet.getState().then(applyState).catch(() => {});
+window.sparkieePet.onSpeech((speech) => {
+  // Ignore superseded or duplicate announcements (state re-sends, restarts).
+  if (!speech || !Number.isInteger(speech.id) || speech.id <= lastSpeechId) return;
+  lastSpeechId = speech.id;
+  void handleSpeech(speech);
+});
+window.addEventListener('pagehide', stopSpeechAudio);

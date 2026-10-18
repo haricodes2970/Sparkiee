@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isAuthorized, toRuntimePayload, DEFAULT_HOST } from '../../core/src/index.mjs';
 import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayload } from '../../core/src/pet-state.mjs';
+import { COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 
 const DASHBOARD_ROOT = fileURLToPath(new URL('../../dashboard/', import.meta.url));
 const STATIC_FILES = new Map([
@@ -107,8 +108,34 @@ export function createSparkieeServer({
   onRestartHost = () => {},
   getCharacterInfo = () => null,
   getCharacters = () => ({ packs: [], invalid: [] }),
+  voiceService = null,
+  refreshVoiceConfig = async () => ({ configured: false, warnings: [] }),
+  isVoiceReady = () => false,
 }) {
   let shutdownRequested = false;
+  const commandSpeechSpokeAt = new Map(); // voiceEvent -> timestamp
+
+  /**
+   * Command reactions may speak a predefined line when spoken voice is
+   * configured, enabled, and the event is outside its cooldown. Movement
+   * commands never speak (autonomous roaming must not chatter), and an
+   * unconfigured provider keeps the original chirps alone.
+   */
+  async function maybeSpeakForCommand(command, snapshot) {
+    if (!voiceService || !isVoiceReady()) return;
+    const speech = snapshot?.settings?.speech;
+    if (!speech || speech.enabled === false || speech.provider !== 'elevenlabs' || speech.style === 'chirps') return;
+    const voiceEvent = COMMAND_SPEECH_EVENTS[command];
+    if (!voiceEvent) return;
+    const now = Date.now();
+    if (now - (commandSpeechSpokeAt.get(voiceEvent) ?? -Infinity) < SPEECH_EVENT_COOLDOWN_MS) return;
+    commandSpeechSpokeAt.set(voiceEvent, now);
+    try {
+      await voiceService.speakEvent(voiceEvent, { source: 'command' });
+    } catch {
+      // Speech is best-effort: the animation and chirp reaction already happened.
+    }
+  }
   const server = createServer(async (request, response) => {
     const host = request.socket.localAddress;
     if (host && host !== '127.0.0.1' && host !== '::ffff:127.0.0.1') {
@@ -154,7 +181,12 @@ export function createSparkieeServer({
         sendJson(response, 400, { error: 'Invalid pet command payload.' });
         return;
       }
-      sendJson(response, 200, { ok: true, pet: petController.command(payload.command) });
+      const petSnapshot = petController.command(payload.command);
+      // Pick up voice configuration changes (e.g. `sparkiee voice setup`)
+      // without a daemon restart; the daemon throttles the actual file read.
+      await refreshVoiceConfig().catch(() => {});
+      await maybeSpeakForCommand(payload.command, petSnapshot);
+      sendJson(response, 200, { ok: true, pet: petSnapshot });
       return;
     }
     if (method === 'PUT' && pathname === '/api/v1/pet/settings') {
@@ -196,6 +228,133 @@ export function createSparkieeServer({
         return;
       }
       sendJson(response, 200, { ok: true, pet: petController.triggerVoice(event) });
+      return;
+    }
+    // -------------------------------------------------------------------------
+    // Voice: provider status, explicit speech, and clip delivery for the pet
+    // host. No route ever includes the API key in a response.
+    // -------------------------------------------------------------------------
+    if (method === 'GET' && pathname === '/api/v1/voice/status') {
+      // Read-only and secret-free, like /api/v1/pet/state; the dashboard
+      // fetches it without a token.
+      const loaded = await refreshVoiceConfig().catch(() => null);
+      const voice = voiceService ? await voiceService.status() : null;
+      // Defence in depth: strip credential-shaped fields from whatever the
+      // service reports, so a future bug cannot leak a key to a browser.
+      const safeVoice = voice && typeof voice === 'object'
+        ? Object.fromEntries(Object.entries(voice).filter(([key]) => !['apikey', 'api_key', 'key', 'token', 'authorization', 'secret'].includes(key.toLowerCase())))
+        : null;
+      sendJson(response, 200, {
+        ok: true,
+        voice: safeVoice,
+        warnings: loaded?.warnings ?? [],
+      });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/voice/speak') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!voiceService) {
+        sendJson(response, 503, { error: 'Voice service unavailable.' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      await refreshVoiceConfig().catch(() => {});
+      const voiceEvent = typeof payload.voiceEvent === 'string' ? payload.voiceEvent : null;
+      let text = null;
+      if (voiceEvent !== null) {
+        if (!isValidVoiceEvent(voiceEvent)) {
+          sendJson(response, 400, { error: 'voiceEvent must be a known event id.' });
+          return;
+        }
+        text = pickLine(voiceEvent, Number.isInteger(payload.lineIndex) ? payload.lineIndex : 0);
+        if (!text) {
+          sendJson(response, 400, { error: 'That event has no configured line.' });
+          return;
+        }
+      } else if (typeof payload.text === 'string') {
+        text = payload.text;
+      } else {
+        sendJson(response, 400, { error: 'Provide "text" or a known "voiceEvent".' });
+        return;
+      }
+      try {
+        const snapshot = await voiceService.speak(text, { voiceEvent, source: 'api' });
+        sendJson(response, 200, {
+          ok: true,
+          speech: snapshot.speech,
+          generated: Boolean(snapshot.speech?.clipId),
+        });
+      } catch (error) {
+        sendJson(response, error.code === 'INVALID_UTTERANCE' ? 400 : 500, {
+          error: error.code === 'INVALID_UTTERANCE' ? error.message : 'Speech generation failed.',
+        });
+      }
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/voice/test') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!voiceService) {
+        sendJson(response, 503, { error: 'Voice service unavailable.' });
+        return;
+      }
+      await refreshVoiceConfig().catch(() => {});
+      try {
+        const snapshot = await voiceService.test();
+        sendJson(response, 200, {
+          ok: true,
+          speech: snapshot.speech,
+          generated: Boolean(snapshot.speech?.clipId),
+        });
+      } catch (error) {
+        sendJson(response, error.code === 'RATE_LIMITED' ? 429 : 500, { error: error.message });
+      }
+      return;
+    }
+    const clipMatch = /^\/api\/v1\/voice\/clip\/(.+)$/.exec(pathname);
+    if (method === 'GET' && clipMatch) {
+      // Raw audio bytes: token-only, never same-origin (renderers never
+      // fetch clips directly; the trusted Electron main process does).
+      if (!isAuthorized(request, token)) {
+        sendJson(response, 401, { error: 'Unauthorized' });
+        return;
+      }
+      if (!voiceService) {
+        sendJson(response, 503, { error: 'Voice service unavailable.' });
+        return;
+      }
+      const clipId = clipMatch[1];
+      if (!/^[a-f0-9]{64}$/.test(clipId)) {
+        sendJson(response, 400, { error: 'Invalid clip id.' });
+        return;
+      }
+      const clip = await voiceService.getClip(clipId);
+      if (clip.status === 'invalid') {
+        sendJson(response, 400, { error: 'Invalid clip id.' });
+        return;
+      }
+      if (clip.status !== 'ok') {
+        sendJson(response, 404, { error: 'Clip not found' });
+        return;
+      }
+      response.writeHead(200, {
+        'content-type': clip.mime,
+        'content-length': clip.audio.length,
+        'cache-control': 'private, max-age=86400',
+        'x-content-type-options': 'nosniff',
+      });
+      response.end(clip.audio);
       return;
     }
     if (method === 'GET' && pathname === '/api/v1/character') {

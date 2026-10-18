@@ -76,3 +76,24 @@ export const AGENT_EVENT_REACTIONS = Object.freeze({
 });
 
 export const AGENT_EVENT_TYPES = Object.freeze(Object.keys(AGENT_EVENT_REACTIONS));
+
+/**
+ * Pet commands that also earn a spoken line when spoken voice is enabled.
+ * Movement and visibility commands are deliberately absent: autonomous
+ * roaming would otherwise chatter continuously.
+ */
+export const COMMAND_SPEECH_EVENTS = Object.freeze({
+  wave: 'greet',
+  celebrate: 'celebration',
+  sleep: 'nap',
+  dance: 'groove',
+  confused: 'confused',
+  thinking: 'think',
+  task_complete: 'task_complete',
+  task_error: 'error',
+  permission_required: 'attention',
+  surprised: 'surprise',
+});
+
+/** Minimum gap between spoken lines of the same event (anti-spam). */
+export const SPEECH_EVENT_COOLDOWN_MS = 6000;

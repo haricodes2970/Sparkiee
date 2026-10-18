@@ -71,12 +71,47 @@ function sanitizePack(pack) {
   };
 }
 
+function isSpeechPayload(speech) {
+  return Boolean(
+    speech && typeof speech === 'object' &&
+    Number.isInteger(speech.id) && speech.id > 0 && speech.id <= 1_000_000_000 &&
+    typeof speech.text === 'string' && speech.text.length > 0 && speech.text.length <= 220 &&
+    (speech.dataUrl === null || (
+      typeof speech.dataUrl === 'string' &&
+      speech.dataUrl.startsWith('data:audio/') &&
+      speech.dataUrl.length <= 6_000_000
+    )) &&
+    (speech.error === null || typeof speech.error === 'string') &&
+    (speech.voiceEvent === null || typeof speech.voiceEvent === 'string') &&
+    (speech.source === null || typeof speech.source === 'string')
+  );
+}
+
+function sanitizeSpeech(speech) {
+  return {
+    id: speech.id,
+    text: speech.text,
+    dataUrl: speech.dataUrl ?? null,
+    error: speech.error ? String(speech.error).slice(0, 40) : null,
+    voiceEvent: speech.voiceEvent ? String(speech.voiceEvent).slice(0, 40) : null,
+    source: speech.source ? String(speech.source).slice(0, 16) : null,
+  };
+}
+
 contextBridge.exposeInMainWorld('sparkieePet', Object.freeze({
   onState(callback) {
     if (typeof callback !== 'function') return () => {};
     const listener = (_event, state) => callback(state);
     ipcRenderer.on('pet:state', listener);
     return () => ipcRenderer.removeListener('pet:state', listener);
+  },
+  onSpeech(callback) {
+    if (typeof callback !== 'function') return () => {};
+    const listener = (_event, speech) => {
+      if (isSpeechPayload(speech)) callback(sanitizeSpeech(speech));
+    };
+    ipcRenderer.on('pet:speech', listener);
+    return () => ipcRenderer.removeListener('pet:speech', listener);
   },
   onPack(callback) {
     if (typeof callback !== 'function') return () => {};

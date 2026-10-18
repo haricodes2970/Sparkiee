@@ -7,6 +7,12 @@ import { ensureRuntimeHome, readAuthToken, resolvePort, resolveRuntimePaths } fr
 import { resolveElectronBinary } from '../../core/src/electron-resolver.mjs';
 import { createHostTracker } from '../../core/src/host-tracker.mjs';
 import { listCharacterPacks } from '../../core/src/character-pack.mjs';
+import { createPetController } from '../../core/src/pet-state.mjs';
+import { loadVoiceConfig, resolveVoiceCacheDir, DEFAULT_VOICE_ID, DEFAULT_MODEL_ID, DEFAULT_OUTPUT_FORMAT } from '../../core/src/voice-config.mjs';
+import { createAudioCache } from '../../core/src/audio-cache.mjs';
+import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
+import { withoutSecrets } from '../../core/src/env-safety.mjs';
+import { createVoiceService } from './voice-service.mjs';
 import { createSparkieeServer } from './server.mjs';
 import os from 'node:os';
 
@@ -52,6 +58,43 @@ async function describeCharacters() {
 let httpServer;
 let petHost;
 let shuttingDown = false;
+
+// ---------------------------------------------------------------------------
+// Voice configuration holder: cached so callers can read it synchronously,
+// refreshed (throttled) on voice traffic so `sparkiee voice setup` applies
+// without a daemon restart. The key never leaves this process.
+// ---------------------------------------------------------------------------
+
+const VOICE_CONFIG_TTL_MS = 3000;
+const DEFAULT_UNCONFIGURED = Object.freeze({
+  configured: false,
+  config: { apiKey: null, voiceId: DEFAULT_VOICE_ID, modelId: DEFAULT_MODEL_ID, outputFormat: DEFAULT_OUTPUT_FORMAT },
+  warnings: [],
+  source: null,
+});
+const petController = createPetController();
+let voiceConfigLoaded = null;
+let voiceConfigAt = 0;
+
+async function refreshVoiceConfig({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && voiceConfigLoaded && now - voiceConfigAt < VOICE_CONFIG_TTL_MS) return voiceConfigLoaded;
+  voiceConfigAt = now;
+  try {
+    voiceConfigLoaded = await loadVoiceConfig();
+  } catch {
+    voiceConfigLoaded = {
+      ...DEFAULT_UNCONFIGURED,
+      warnings: ['Voice configuration could not be read.'],
+    };
+  }
+  petController.setVoiceCapability(voiceConfigLoaded.configured === true);
+  return voiceConfigLoaded;
+}
+
+function getVoiceConfig() {
+  return voiceConfigLoaded ?? DEFAULT_UNCONFIGURED;
+}
 
 async function log(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`;
@@ -109,8 +152,10 @@ function launchPetHost(token) {
     }
     petHost = spawn(resolved.binary, [...hostArgs, PET_APP_DIR], {
       cwd: PET_APP_DIR,
+      // Provider credentials stay with the daemon; the pet host only needs
+      // the runtime token and port.
       env: {
-        ...process.env,
+        ...withoutSecrets(process.env),
         SPARKIEE_PORT: String(port),
         SPARKIEE_HOME: paths.home,
         SPARKIEE_RUNTIME_TOKEN: token,
@@ -205,10 +250,19 @@ async function shutdown(reason) {
 async function main() {
   await ensureRuntimeHome(paths);
   const token = await readAuthToken(paths);
+  await refreshVoiceConfig({ force: true });
+  const voiceCache = createAudioCache({ dir: resolveVoiceCacheDir() });
+  const voiceService = createVoiceService({
+    getConfig: getVoiceConfig,
+    getClient: (config) => createElevenLabsClient({ config }),
+    cache: voiceCache,
+    petController,
+  });
   httpServer = createSparkieeServer({
     port,
     token,
     onShutdown: () => void shutdown('API request'),
+    petController,
     getHostState: () => hostTracker.snapshot(),
     onRestartHost: () => restartHost(),
     getCharacterInfo: async () => {
@@ -216,6 +270,9 @@ async function main() {
       return packs.find((pack) => pack.id === 'sparkiee-original') ?? packs[0] ?? null;
     },
     getCharacters: () => describeCharacters(),
+    voiceService,
+    refreshVoiceConfig: () => refreshVoiceConfig(),
+    isVoiceReady: () => getVoiceConfig().configured === true,
   });
   runtimeToken = token;
 

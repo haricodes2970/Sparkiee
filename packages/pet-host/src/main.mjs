@@ -29,6 +29,9 @@ let dragOrigin = null;
 let movement;
 let currentPack = null;
 let loadedPackId = null;
+let sentSpeechId = 0;
+let deliveringSpeech = false;
+const hostStartedAt = Date.now();
 
 if (process.platform === 'linux' && process.env.SPARKIEE_OZONE_PLATFORM !== 'wayland') {
   // Phase 0 selected XWayland for GNOME because the pet needs window positioning.
@@ -157,6 +160,71 @@ function publishState(state) {
     }
     reactToMovement(state);
     void reloadPackForState(state);
+    void deliverPendingSpeech();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Speech delivery: the daemon announces {id, text, clipId} in pet state after
+// generation succeeds; the main process downloads the cached clip with the
+// runtime token and hands the renderer a data URL. Renderers never see the
+// API key, the token, or any network route.
+// ---------------------------------------------------------------------------
+
+async function buildSpeechPayload(speech) {
+  const base = {
+    id: speech.id,
+    text: String(speech.text ?? '').slice(0, 220),
+    voiceEvent: typeof speech.voiceEvent === 'string' ? speech.voiceEvent.slice(0, 40) : null,
+    source: typeof speech.source === 'string' ? speech.source.slice(0, 16) : null,
+    dataUrl: null,
+    error: null,
+  };
+  if (!speech.clipId || !/^[a-f0-9]{64}$/.test(speech.clipId)) {
+    return { ...base, error: typeof speech.error === 'string' && speech.error ? speech.error.slice(0, 40) : 'unavailable' };
+  }
+  if (!TOKEN || !/^[a-f0-9]{64}$/.test(TOKEN)) return { ...base, error: 'no_token' };
+  try {
+    const response = await fetch(apiUrl(`/api/v1/voice/clip/${speech.clipId}`), {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return { ...base, error: 'clip_unavailable' };
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length === 0 || bytes.length > 4_000_000) return { ...base, error: 'clip_unavailable' };
+    const mime = (response.headers.get('content-type') || 'audio/mpeg').split(';')[0].trim();
+    if (!/^audio\/[a-z0-9.+-]+$/.test(mime)) return { ...base, error: 'clip_unavailable' };
+    return { ...base, dataUrl: `data:${mime};base64,${bytes.toString('base64')}` };
+  } catch {
+    return { ...base, error: 'clip_unavailable' };
+  }
+}
+
+async function deliverPendingSpeech() {
+  if (deliveringSpeech) return;
+  deliveringSpeech = true;
+  try {
+    for (;;) {
+      const speech = latestState?.speech;
+      if (!speech || !Number.isInteger(speech.id) || speech.id <= sentSpeechId) return;
+      // Do not replay the previous phrase after a pet-host restart.
+      const announcedAt = Date.parse(speech.at);
+      if (Number.isFinite(announcedAt) && announcedAt < hostStartedAt - 2000) {
+        sentSpeechId = speech.id;
+        continue;
+      }
+      const payload = await buildSpeechPayload(speech);
+      sentSpeechId = speech.id;
+      // A newer phrase arrived while fetching: this one is obsolete.
+      const latest = latestState?.speech;
+      if (latest && latest.id === speech.id && petWindow && !petWindow.isDestroyed()) {
+        petWindow.webContents.send('pet:speech', payload);
+      }
+    }
+  } catch {
+    // Speech delivery is best-effort; animation and captions continue.
+  } finally {
+    deliveringSpeech = false;
   }
 }
 
