@@ -86,37 +86,105 @@ export function createPetController({ clock = () => Date.now() } = {}) {
     message: MESSAGES.idle,
     updatedAt: new Date(clock()).toISOString(),
   };
-  let settings = { moveSpeed: 1, autoRoam: true };
+  let settings = {
+    moveSpeed: 1,
+    autoRoam: true,
+    audio: { enabled: true, volume: 0.7 },
+    captions: { enabled: true, durationMs: 2600, large: false },
+    characterId: null,
+  };
+  let voice = null;
   let lastHeartbeat = 0;
+
+  function invalid(message) {
+    const error = new Error(message);
+    error.code = 'INVALID_PET_SETTINGS';
+    return error;
+  }
 
   return {
     snapshot() {
       return {
         ...state,
-        settings: { ...settings },
+        voice: voice ? { ...voice } : null,
+        settings: {
+          ...settings,
+          audio: { ...settings.audio },
+          captions: { ...settings.captions },
+        },
         hostConnected: lastHeartbeat > 0 && clock() - lastHeartbeat < 3500,
       };
     },
     updateSettings(partial) {
-      const next = { ...settings };
+      const next = {
+        ...settings,
+        audio: { ...settings.audio },
+        captions: { ...settings.captions },
+      };
       if ('moveSpeed' in partial) {
         const speed = Number(partial.moveSpeed);
         if (!Number.isFinite(speed) || speed < MOVE_SPEED_MIN || speed > MOVE_SPEED_MAX) {
-          const error = new Error(`moveSpeed must be a number from ${MOVE_SPEED_MIN} to ${MOVE_SPEED_MAX}.`);
-          error.code = 'INVALID_PET_SETTINGS';
-          throw error;
+          throw invalid(`moveSpeed must be a number from ${MOVE_SPEED_MIN} to ${MOVE_SPEED_MAX}.`);
         }
         next.moveSpeed = speed;
       }
       if ('autoRoam' in partial) {
-        if (typeof partial.autoRoam !== 'boolean') {
-          const error = new Error('autoRoam must be a boolean.');
-          error.code = 'INVALID_PET_SETTINGS';
-          throw error;
-        }
+        if (typeof partial.autoRoam !== 'boolean') throw invalid('autoRoam must be a boolean.');
         next.autoRoam = partial.autoRoam;
       }
+      if ('audio' in partial) {
+        const audio = partial.audio;
+        if (!audio || typeof audio !== 'object' || Array.isArray(audio)) throw invalid('audio must be an object.');
+        for (const key of Object.keys(audio)) {
+          if (!['enabled', 'volume'].includes(key)) throw invalid(`audio.${key} is not a supported audio setting.`);
+        }
+        if ('enabled' in audio && typeof audio.enabled !== 'boolean') throw invalid('audio.enabled must be a boolean.');
+        if ('volume' in audio) {
+          const volume = Number(audio.volume);
+          if (!Number.isFinite(volume) || volume < 0 || volume > 1) throw invalid('audio.volume must be a number from 0 to 1.');
+          next.audio.volume = volume;
+        }
+        if ('enabled' in audio) next.audio.enabled = audio.enabled;
+      }
+      if ('captions' in partial) {
+        const captions = partial.captions;
+        if (!captions || typeof captions !== 'object' || Array.isArray(captions)) throw invalid('captions must be an object.');
+        for (const key of Object.keys(captions)) {
+          if (!['enabled', 'durationMs', 'large'].includes(key)) throw invalid(`captions.${key} is not a supported caption setting.`);
+        }
+        if ('enabled' in captions && typeof captions.enabled !== 'boolean') throw invalid('captions.enabled must be a boolean.');
+        if ('large' in captions && typeof captions.large !== 'boolean') throw invalid('captions.large must be a boolean.');
+        if ('durationMs' in captions) {
+          const duration = Number(captions.durationMs);
+          if (!Number.isInteger(duration) || duration < 800 || duration > 15_000) {
+            throw invalid('captions.durationMs must be an integer from 800 to 15000.');
+          }
+          next.captions.durationMs = duration;
+        }
+        if ('enabled' in captions) next.captions.enabled = captions.enabled;
+        if ('large' in captions) next.captions.large = captions.large;
+      }
+      if ('characterId' in partial) {
+        const id = partial.characterId;
+        if (id !== null && (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(id))) {
+          throw invalid('characterId must be null or a valid character pack id.');
+        }
+        next.characterId = id;
+      }
       settings = next;
+      return this.snapshot();
+    },
+    /**
+     * Trigger an explicit voice reaction (for example the dashboard test
+     * sound) without changing the current animation.
+     */
+    triggerVoice(event) {
+      if (typeof event !== 'string' || !/^[a-z][a-z0-9_]{1,32}$/.test(event)) {
+        const error = new Error('voice event must be a valid event id.');
+        error.code = 'INVALID_VOICE_EVENT';
+        throw error;
+      }
+      voice = { event, at: new Date(clock()).toISOString() };
       return this.snapshot();
     },
     heartbeat() {
@@ -154,14 +222,47 @@ export function isValidPetCommandPayload(payload) {
   );
 }
 
+const SETTINGS_TOP_LEVEL_KEYS = ['moveSpeed', 'autoRoam', 'audio', 'captions', 'characterId'];
+
+function isValidAudioSettings(audio) {
+  if (!audio || typeof audio !== 'object' || Array.isArray(audio)) return false;
+  const keys = Object.keys(audio);
+  if (keys.length === 0 || keys.some((key) => !['enabled', 'volume'].includes(key))) return false;
+  if ('enabled' in audio && typeof audio.enabled !== 'boolean') return false;
+  if ('volume' in audio) {
+    const volume = Number(audio.volume);
+    if (!Number.isFinite(volume) || volume < 0 || volume > 1) return false;
+  }
+  return true;
+}
+
+function isValidCaptionSettings(captions) {
+  if (!captions || typeof captions !== 'object' || Array.isArray(captions)) return false;
+  const keys = Object.keys(captions);
+  if (keys.length === 0 || keys.some((key) => !['enabled', 'durationMs', 'large'].includes(key))) return false;
+  if ('enabled' in captions && typeof captions.enabled !== 'boolean') return false;
+  if ('large' in captions && typeof captions.large !== 'boolean') return false;
+  if ('durationMs' in captions) {
+    const duration = Number(captions.durationMs);
+    if (!Number.isInteger(duration) || duration < 800 || duration > 15_000) return false;
+  }
+  return true;
+}
+
 export function isValidPetSettingsPayload(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
   const keys = Object.keys(payload);
-  if (keys.length === 0 || keys.some((key) => !['moveSpeed', 'autoRoam'].includes(key))) return false;
+  if (keys.length === 0 || keys.some((key) => !SETTINGS_TOP_LEVEL_KEYS.includes(key))) return false;
   if ('moveSpeed' in payload) {
     const speed = Number(payload.moveSpeed);
     if (!Number.isFinite(speed) || speed < MOVE_SPEED_MIN || speed > MOVE_SPEED_MAX) return false;
   }
   if ('autoRoam' in payload && typeof payload.autoRoam !== 'boolean') return false;
+  if ('audio' in payload && !isValidAudioSettings(payload.audio)) return false;
+  if ('captions' in payload && !isValidCaptionSettings(payload.captions)) return false;
+  if ('characterId' in payload) {
+    const id = payload.characterId;
+    if (id !== null && (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(id))) return false;
+  }
   return true;
 }

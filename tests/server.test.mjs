@@ -244,10 +244,67 @@ test('pet settings endpoint validates input and applies updates', async () => {
     });
     assert.equal(accepted.status, 200);
     const payload = await accepted.json();
-    assert.deepEqual(payload.pet.settings, { moveSpeed: 2, autoRoam: false });
+    assert.equal(payload.pet.settings.moveSpeed, 2);
+    assert.equal(payload.pet.settings.autoRoam, false);
+
+    const nested = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/settings`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${instance.port}` },
+      body: JSON.stringify({ audio: { enabled: false, volume: 0.3 }, captions: { durationMs: 5000, large: true } }),
+    });
+    assert.equal(nested.status, 200);
+    const nestedPayload = await nested.json();
+    assert.deepEqual(nestedPayload.pet.settings.audio, { enabled: false, volume: 0.3 });
+    assert.equal(nestedPayload.pet.settings.captions.durationMs, 5000);
 
     const state = await (await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/state`)).json();
-    assert.deepEqual(state.settings, { moveSpeed: 2, autoRoam: false });
+    assert.equal(state.settings.moveSpeed, 2);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('test-sound triggers a voice event with auth and rejects bad event ids', async () => {
+  const instance = await startServer();
+  try {
+    const denied = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/test-sound`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'https://attacker.example' },
+      body: '{}',
+    });
+    assert.equal(denied.status, 403);
+
+    const bad = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/test-sound`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${instance.port}` },
+      body: JSON.stringify({ event: 'NOT VALID' }),
+    });
+    assert.equal(bad.status, 400);
+
+    const ok = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/test-sound`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${instance.port}` },
+      body: JSON.stringify({ event: 'celebration' }),
+    });
+    assert.equal(ok.status, 200);
+    const payload = await ok.json();
+    assert.equal(payload.pet.voice.event, 'celebration');
+    assert.ok(payload.pet.voice.at);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('character endpoints expose pack metadata without file paths', async () => {
+  const instance = await startServer({
+    getCharacterInfo: async () => ({ id: 'sparkiee-original', name: 'Sparkiee', version: '1.0.0', voiceStyle: 'synth', animationCount: 13 }),
+    getCharacters: async () => ({ packs: [{ id: 'sparkiee-original', name: 'Sparkiee' }], invalid: [] }),
+  });
+  try {
+    const character = await (await fetch(`http://127.0.0.1:${instance.port}/api/v1/character`)).json();
+    assert.equal(character.character.id, 'sparkiee-original');
+    const characters = await (await fetch(`http://127.0.0.1:${instance.port}/api/v1/characters`)).json();
+    assert.equal(characters.packs.length, 1);
   } finally {
     await close(instance.server);
   }

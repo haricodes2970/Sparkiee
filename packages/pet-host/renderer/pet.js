@@ -1,3 +1,5 @@
+import { createAudioEngine } from './lib/audio-engine.mjs';
+
 const root = document.querySelector('#pet-root');
 const spriteEl = document.querySelector('#pet-sprite');
 const statusText = document.querySelector('#pet-status');
@@ -10,6 +12,12 @@ let currentState = null;
 let currentPack = null;
 let pointerStart = null;
 let dragged = false;
+let lastVoiceAt = null;
+let lastAnimation = null;
+let captionTimer = null;
+
+const audio = createAudioEngine();
+window.addEventListener('pagehide', () => audio.dispose());
 
 // ---------------------------------------------------------------------------
 // Sprite frame player: swaps background-position on a pixelated sheet.
@@ -78,12 +86,59 @@ const spritePlayer = (() => {
 spriteEl.classList.add('loading');
 
 // ---------------------------------------------------------------------------
+// Captions: appear beneath the character, synced with voice events. Captions
+// keep working when audio is muted.
+// ---------------------------------------------------------------------------
+
+function captionSettings() {
+  const captions = currentState?.settings?.captions;
+  return {
+    enabled: captions?.enabled !== false,
+    durationMs: Number.isInteger(captions?.durationMs) ? captions.durationMs : (currentPack?.layout?.captionDurationMs ?? 2600),
+    large: captions?.large === true,
+  };
+}
+
+function showCaption(text, { ms = null } = {}) {
+  const settings = captionSettings();
+  captionBox.classList.toggle('large', settings.large);
+  if (!settings.enabled) {
+    captionBox.classList.remove('visible');
+    return;
+  }
+  const value = String(text || '').slice(0, 180);
+  if (captionText.textContent !== value) {
+    captionText.textContent = value;
+    captionBox.classList.remove('caption-bump');
+    void captionBox.offsetWidth; // restart the pop animation
+    captionBox.classList.add('caption-bump');
+  }
+  captionBox.classList.add('visible');
+  if (captionTimer) clearTimeout(captionTimer);
+  const duration = ms ?? settings.durationMs;
+  if (duration > 0) {
+    captionTimer = setTimeout(() => {
+      captionBox.classList.remove('visible');
+      captionTimer = null;
+    }, duration);
+  }
+}
+
+async function reactWithVoice(eventId, caption) {
+  if (caption) showCaption(caption);
+  try {
+    await audio.playVoice(eventId);
+  } catch {
+    // Audio is best-effort; captions and animation already happened.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // State application
 // ---------------------------------------------------------------------------
 
 function applyState(state) {
   if (!state || typeof state !== 'object') return;
-  const previous = currentState;
   currentState = state;
   statusText.textContent = String(state.label || 'Hanging out').toLowerCase().slice(0, 40);
   connectionDot.classList.toggle('disconnected', state.hostConnected !== true);
@@ -91,22 +146,30 @@ function applyState(state) {
   if (state.visible === false) root.dataset.hidden = 'true';
   else delete root.dataset.hidden;
 
-  const caption = String(state.message || '').slice(0, 180);
-  if (captionText.textContent !== caption) {
-    captionText.textContent = caption;
-    captionBox.classList.remove('caption-bump');
-    void captionBox.offsetWidth; // restart the pop animation
-    captionBox.classList.add('caption-bump');
-  }
-  captionBox.classList.add('visible');
+  if (state.settings?.audio) audio.setSettings(state.settings.audio);
 
-  if (currentPack) {
-    const animation = currentPack.animations[state.animation] ? state.animation : 'idle';
-    spritePlayer.play(currentPack, animation);
-    if (previous && previous.animation !== state.animation) {
-      window.dispatchEvent(new CustomEvent('sparkiee:animation-changed', { detail: { from: previous.animation, to: state.animation } }));
+  const animation = currentPack?.animations?.[state.animation] ? state.animation : 'idle';
+  if (currentPack) spritePlayer.play(currentPack, animation);
+
+  // Default caption follows the state message.
+  showCaption(state.message || '');
+
+  // Voice reactions fire when the animation changes or an explicit voice
+  // trigger arrives (for example the dashboard test-sound button).
+  const packEvents = currentPack?.voiceEvents ?? {};
+  const commandMap = currentPack?.commandVoiceEvents ?? {};
+  if (state.voice && state.voice.at && state.voice.at !== lastVoiceAt) {
+    lastVoiceAt = state.voice.at;
+    if (packEvents[state.voice.event]) {
+      void reactWithVoice(state.voice.event, packEvents[state.voice.event]?.caption);
+    }
+  } else if (currentPack && state.animation !== lastAnimation) {
+    const eventId = commandMap[state.animation];
+    if (eventId && packEvents[eventId]) {
+      void reactWithVoice(eventId, packEvents[eventId]?.caption);
     }
   }
+  lastAnimation = state.animation;
 }
 
 async function command(name) {
@@ -126,6 +189,7 @@ async function command(name) {
 function applyPack(pack) {
   if (!pack || typeof pack !== 'object' || !pack.sprite || !pack.animations) return;
   currentPack = pack;
+  audio.setPack(pack);
   spritePlayer.load(pack);
 }
 window.sparkieePet.onPack(applyPack);

@@ -6,19 +6,49 @@ import { fileURLToPath } from 'node:url';
 import { ensureRuntimeHome, readAuthToken, resolvePort, resolveRuntimePaths } from '../../core/src/index.mjs';
 import { resolveElectronBinary } from '../../core/src/electron-resolver.mjs';
 import { createHostTracker } from '../../core/src/host-tracker.mjs';
+import { listCharacterPacks } from '../../core/src/character-pack.mjs';
 import { createSparkieeServer } from './server.mjs';
+import os from 'node:os';
 
 const paths = resolveRuntimePaths();
 const port = resolvePort();
 const host = '127.0.0.1';
 const require = createRequire(import.meta.url);
 const PET_APP_DIR = fileURLToPath(new URL('../../pet-host/', import.meta.url));
+const CHARACTER_ROOTS = [
+  // repo-relative bundled packs: packages/server/src -> repo root
+  fileURLToPath(new URL('../../../assets/characters/', import.meta.url)),
+  path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'sparkiee', 'characters'),
+];
 const petDisabled = process.env.SPARKIEE_DISABLE_PET === '1';
 const noDisplay = process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
 const hostTracker = createHostTracker({ disabled: petDisabled, noDisplay });
 const MAX_HOST_RESTARTS = 3;
 let runtimeToken = null;
 let restartTimer;
+let characterCache = { at: 0, value: { packs: [], invalid: [] } };
+
+async function describeCharacters() {
+  const now = Date.now();
+  if (now - characterCache.at < 5_000) return characterCache.value;
+  const { packs, invalid } = await listCharacterPacks(CHARACTER_ROOTS);
+  characterCache = {
+    at: now,
+    value: {
+      packs: packs.map((pack) => ({
+        id: pack.id,
+        name: pack.name,
+        version: pack.version,
+        description: pack.description,
+        license: pack.license,
+        voiceStyle: pack.voice.style,
+        animationCount: Object.keys(pack.animations).length,
+      })),
+      invalid,
+    },
+  };
+  return characterCache.value;
+}
 let httpServer;
 let petHost;
 let shuttingDown = false;
@@ -181,6 +211,11 @@ async function main() {
     onShutdown: () => void shutdown('API request'),
     getHostState: () => hostTracker.snapshot(),
     onRestartHost: () => restartHost(),
+    getCharacterInfo: async () => {
+      const { packs } = await describeCharacters();
+      return packs.find((pack) => pack.id === 'sparkiee-original') ?? packs[0] ?? null;
+    },
+    getCharacters: () => describeCharacters(),
   });
   runtimeToken = token;
 

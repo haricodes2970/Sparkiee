@@ -63,19 +63,63 @@ test('command payloads accept only a single supported command field', () => {
 
 test('pet settings default to speed 1 with autonomous roaming enabled', () => {
   const pet = createPetController();
-  assert.deepEqual(pet.snapshot().settings, { moveSpeed: 1, autoRoam: true });
+  const { settings } = pet.snapshot();
+  assert.equal(settings.moveSpeed, 1);
+  assert.equal(settings.autoRoam, true);
+  assert.deepEqual(settings.audio, { enabled: true, volume: 0.7 });
+  assert.deepEqual(settings.captions, { enabled: true, durationMs: 2600, large: false });
+  assert.equal(settings.characterId, null);
 });
 
 test('pet settings accept validated updates and reject out-of-range values', () => {
   const pet = createPetController();
   const updated = pet.updateSettings({ moveSpeed: 2.5, autoRoam: false });
-  assert.deepEqual(updated.settings, { moveSpeed: 2.5, autoRoam: false });
+  assert.equal(updated.settings.moveSpeed, 2.5);
+  assert.equal(updated.settings.autoRoam, false);
 
   assert.throws(() => pet.updateSettings({ moveSpeed: 0 }), /moveSpeed must be a number/);
   assert.throws(() => pet.updateSettings({ moveSpeed: 99 }), /moveSpeed must be a number/);
   assert.throws(() => pet.updateSettings({ moveSpeed: 'fast' }), /moveSpeed must be a number/);
   assert.throws(() => pet.updateSettings({ autoRoam: 'yes' }), /autoRoam must be a boolean/);
-  assert.deepEqual(pet.snapshot().settings, { moveSpeed: 2.5, autoRoam: false });
+  assert.equal(pet.snapshot().settings.moveSpeed, 2.5);
+  assert.equal(pet.snapshot().settings.autoRoam, false);
+});
+
+test('audio, captions, and character settings validate strictly', () => {
+  const pet = createPetController();
+  const updated = pet.updateSettings({
+    audio: { enabled: false, volume: 0.2 },
+    captions: { enabled: true, durationMs: 4000, large: true },
+    characterId: 'sparkiee-original',
+  });
+  assert.deepEqual(updated.settings.audio, { enabled: false, volume: 0.2 });
+  assert.deepEqual(updated.settings.captions, { enabled: true, durationMs: 4000, large: true });
+  assert.equal(updated.settings.characterId, 'sparkiee-original');
+
+  // partial nested updates keep siblings
+  const partial = pet.updateSettings({ audio: { volume: 0.9 } });
+  assert.deepEqual(partial.settings.audio, { enabled: false, volume: 0.9 });
+
+  assert.throws(() => pet.updateSettings({ audio: { volume: 2 } }), /audio.volume/);
+  assert.throws(() => pet.updateSettings({ audio: { enabled: 'yes' } }), /audio.enabled/);
+  assert.throws(() => pet.updateSettings({ audio: { loud: true } }), /audio.loud/);
+  assert.throws(() => pet.updateSettings({ captions: { durationMs: 100 } }), /captions.durationMs/);
+  assert.throws(() => pet.updateSettings({ captions: { large: 'y' } }), /captions.large/);
+  assert.throws(() => pet.updateSettings({ characterId: '../etc' }), /characterId/);
+  assert.throws(() => pet.updateSettings({ characterId: 42 }), /characterId/);
+  pet.updateSettings({ characterId: null });
+  assert.equal(pet.snapshot().settings.characterId, null);
+});
+
+test('explicit voice triggers stamp a fresh voice event without changing animation', () => {
+  let time = 5000;
+  const pet = createPetController({ clock: () => time });
+  pet.command('dance');
+  time += 500;
+  const snap = pet.triggerVoice('greet');
+  assert.equal(snap.animation, 'dance', 'animation untouched');
+  assert.deepEqual(snap.voice, { event: 'greet', at: new Date(5500).toISOString() });
+  assert.throws(() => pet.triggerVoice('Bad Event!'), /valid event id/);
 });
 
 test('settings payload validation accepts partial updates and rejects unknown keys', () => {
@@ -89,4 +133,19 @@ test('settings payload validation accepts partial updates and rejects unknown ke
   assert.equal(isValidPetSettingsPayload({ autoRoam: 0 }), false);
   assert.equal(isValidPetSettingsPayload(null), false);
   assert.equal(isValidPetSettingsPayload([1]), false);
+});
+
+test('settings payload validation accepts nested audio, captions, and character ids', () => {
+  assert.equal(isValidPetSettingsPayload({ audio: { enabled: false, volume: 0.5 } }), true);
+  assert.equal(isValidPetSettingsPayload({ audio: { volume: 1 } }), true);
+  assert.equal(isValidPetSettingsPayload({ audio: {} }), false);
+  assert.equal(isValidPetSettingsPayload({ audio: { volume: -0.1 } }), false);
+  assert.equal(isValidPetSettingsPayload({ audio: { bogus: 1 } }), false);
+  assert.equal(isValidPetSettingsPayload({ captions: { enabled: false, durationMs: 9000, large: true } }), true);
+  assert.equal(isValidPetSettingsPayload({ captions: { durationMs: 799 } }), false);
+  assert.equal(isValidPetSettingsPayload({ captions: { durationMs: 15_001 } }), false);
+  assert.equal(isValidPetSettingsPayload({ characterId: 'my-pack-2' }), true);
+  assert.equal(isValidPetSettingsPayload({ characterId: null }), true);
+  assert.equal(isValidPetSettingsPayload({ characterId: 'Bad ID' }), false);
+  assert.equal(isValidPetSettingsPayload({ moveSpeed: 1, audio: { enabled: true }, captions: { large: true }, characterId: null, autoRoam: false }), true);
 });

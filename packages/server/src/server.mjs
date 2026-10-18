@@ -105,6 +105,8 @@ export function createSparkieeServer({
   petController = createPetController(),
   getHostState = () => ({ phase: 'idle', pid: null, pidAlive: false, lastError: null, restarts: 0, since: startedAt }),
   onRestartHost = () => {},
+  getCharacterInfo = () => null,
+  getCharacters = () => ({ packs: [], invalid: [] }),
 }) {
   let shutdownRequested = false;
   const server = createServer(async (request, response) => {
@@ -172,6 +174,42 @@ export function createSparkieeServer({
         return;
       }
       sendJson(response, 200, { ok: true, pet: petController.updateSettings(payload) });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/pet/test-sound') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      let payload = {};
+      if (request.headers['content-length'] && request.headers['content-length'] !== '0') {
+        try {
+          payload = await readJsonBody(request);
+        } catch (error) {
+          sendJson(response, error.statusCode ?? 400, { error: error.message });
+          return;
+        }
+      }
+      const event = payload && typeof payload.event === 'string' ? payload.event : 'greet';
+      if (!/^[a-z][a-z0-9_]{1,32}$/.test(event)) {
+        sendJson(response, 400, { error: 'event must be a valid voice event id.' });
+        return;
+      }
+      sendJson(response, 200, { ok: true, pet: petController.triggerVoice(event) });
+      return;
+    }
+    if (method === 'GET' && pathname === '/api/v1/character') {
+      let character = null;
+      try {
+        character = await getCharacterInfo();
+      } catch {
+        character = null;
+      }
+      sendJson(response, 200, { character });
+      return;
+    }
+    if (method === 'GET' && pathname === '/api/v1/characters') {
+      sendJson(response, 200, await getCharacters());
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/host/restart') {
