@@ -7,3 +7,10 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Voice provider secrets (the real config lives under $XDG_CONFIG_HOME/sparkiee;
+# these patterns defend against accidental in-repo copies)
+voice.json
+*.secret.json
+secrets/
+sparkiee-voice*.json

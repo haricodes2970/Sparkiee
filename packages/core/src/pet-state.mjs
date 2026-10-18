@@ -79,7 +79,7 @@ export const COMMAND_VOICE_EVENTS = Object.freeze({
 export function createPetController({ clock = () => Date.now() } = {}) {
   let state = {
     characterId: 'sparkiee-original',
-    characterName: 'Sparkiee',
+    characterName: 'Sparky',
     animation: 'idle',
     visible: true,
     label: LABELS.idle,
