@@ -53,6 +53,26 @@ Updated: 2026-10-18
       rapid commands, hide/show, pid-file edge cases, log token-leak checks,
       manifest validation, path escapes, audio queueing, cooldowns, and
       caption visibility.
+- [x] **Phase 3A spoken voice**: secure ElevenLabs configuration (env/file
+      precedence, 0600 storage, redacted status), official REST client with
+      normalised error codes, sha256-keyed local clip cache with a 25MB LRU
+      cap, predefined original utterance library, daemon-side voice service
+      (async, in-flight dedup, rate-limited tests), voice endpoints with
+      token-only clip delivery, pet-host playback with subtitles synced to
+      the spoken phrase, and honest failure fallbacks (caption plus chirp,
+      never fake success).
+- [x] **Dashboard and CLI voice controls**: provider status panel, speech
+      enable/style controls, debounced test button, and
+      `sparkiee voice status|setup|test|mute|unmute` with hidden key input.
+- [x] **OpenCode observer plugin**: official V2 Plugin API, observer-only,
+      reports confirmed execution lifecycle facts (task_complete only on
+      execution succeeded, idle never celebrated, permission events never
+      auto-approved) to /api/v1/agent/event with per-session dedup and
+      cooldowns.
+- [x] 146 automated tests pass (2026-10-18) after Phase 3A, including a
+      full daemon voice lifecycle run against a loopback provider mock:
+      key-leak scans across every endpoint, token-gated clip delivery,
+      cache hits, and caption-preserving failure paths.
 
 ## Verified on Fedora 44 / GNOME 50.3 Wayland (2026-10-18)
 
@@ -73,11 +93,14 @@ Updated: 2026-10-18
 
 ## Pending
 
+- [ ] One live desktop verification of spoken voice with a real
+      ElevenLabs key: audible playback, subtitle sync, mute behaviour.
+      Mocked tests never count as proof of sound.
 - [ ] Audio persistence decisions: settings currently live in memory; persist
       across restarts with the Phase 6 settings work.
 - [ ] Second character pack to prove the format end-to-end.
-- [ ] OpenCode observer plugin: task events → celebration/error/attention emotes
-      (engine voice map and test-sound endpoint are ready).
+- [ ] Phase 3B groundwork: local wake word and speech input with explicit
+      microphone permission and indicators; no continuous cloud streaming.
 - [ ] Publish decision: re-check npm name availability before any publication.
 
 ## Known limitations
@@ -86,12 +109,16 @@ Updated: 2026-10-18
 - Fullscreen Wayland-native windows cover the pet (GNOME stacking behaviour).
 - No global hotkeys on Wayland; the dashboard and pet window drive actions.
 - Activity history is dashboard-session-local and not persisted.
-- The pet does not yet observe OpenCode sessions.
 - User-local character packs are validated but not sandboxed beyond path
   checks; only install packs you trust.
+- Spoken voice needs an ElevenLabs account and key; without one the pet
+  behaves exactly as before (chirps + captions). Audible playback of the
+  speech pipeline has not yet been verified live with a real key.
 
 ## Next
 
-1. OpenCode observer plugin using the official plugin event API.
-2. Settings persistence across restarts (Phase 6 groundwork).
-3. Second character pack to exercise the picker and clip-style voices.
+1. Live desktop verification of spoken voice with a real ElevenLabs key.
+2. Phase 3B groundwork: local wake word and speech input (explicit mic
+   permission, indicators, no continuous cloud streaming).
+3. Settings persistence across restarts (Phase 6 groundwork).
+4. Second character pack to exercise the picker and clip-style voices.
