@@ -1,3 +1,5 @@
+import { createFramePlayer } from '/src/lib/frame-player.mjs';
+
 const connectionPill = document.querySelector('#connection-pill');
 const connectionText = document.querySelector('#connection-text');
 const runtimeState = document.querySelector('#runtime-state');
@@ -36,6 +38,19 @@ const characterNameEl = document.querySelector('#character-name');
 const characterMetaEl = document.querySelector('#character-meta');
 const characterPicker = document.querySelector('.character-picker');
 const characterSelect = document.querySelector('#character-select');
+// Habitat: the dashboard renders the *real* character pack here, but only
+// while this tab owns presentation (one live surface at a time — in desktop
+// mode this stage shows a status message, never a second drawn pet).
+const habitatStage = document.querySelector('#habitat-stage');
+const habitatBadge = document.querySelector('#habitat-mode-badge');
+const habitatEmpty = document.querySelector('#habitat-empty');
+const habitatEmptyTitle = document.querySelector('#habitat-empty-title');
+const habitatEmptyNote = document.querySelector('#habitat-empty-note');
+const habitatSprite = document.querySelector('#habitat-sprite');
+const habitatCaption = document.querySelector('#habitat-caption');
+const habitatOwnerText = document.querySelector('#habitat-owner-text');
+const bringToHabitatButton = document.querySelector('#bring-to-habitat');
+const sendToDesktopButton = document.querySelector('#send-to-desktop');
 const activity = [];
 let lastPetState = null;
 let commandInFlight = false;
@@ -44,6 +59,31 @@ let settingsInFlight = false;
 let characterPacks = [];
 let voiceStatusInFlight = false;
 let voiceTestInFlight = false;
+// Presentation ownership: one stable session id per browser tab
+// (sessionStorage survives a refresh, so a refresh renews the same claim
+// instead of creating a second owner).
+const PRESENTATION_OWNER_KEY = 'sparkiee.presentationOwner';
+function resolvePresentationOwner() {
+  try {
+    const existing = sessionStorage.getItem(PRESENTATION_OWNER_KEY);
+    if (existing) return existing;
+    const fresh = globalThis.crypto?.randomUUID?.()
+      ?? `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    sessionStorage.setItem(PRESENTATION_OWNER_KEY, fresh);
+    return fresh;
+  } catch {
+    // Storage blocked: per-load owner (lease renewal still keeps it alive).
+    return `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+const presentationOwner = resolvePresentationOwner();
+let habitatMode = null;          // desktop | claiming | owned | other-tab
+let habitatPack = null;
+let habitatPlayer = null;
+let habitatOwnedSince = 0;        // epoch ms — caption replay guard
+let lastHabitatSpeechId = 0;
+let presentationInFlight = false;
+let captionHideTimer = null;
 
 const SPEECH_ERROR_TEXT = {
   not_configured: 'No API key yet — run “sparkiee voice setup”. Original chirps are in use meanwhile.',
@@ -159,6 +199,210 @@ function renderActivity() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Presentation ownership: this tab renders the live pet ONLY while it owns
+// the claim (state.presentation). Desktop mode shows a status message — never
+// a second drawn character. The claim renews on every poll; the daemon's
+// bounded lease restores the desktop when this tab dies (no unload reliance).
+// ---------------------------------------------------------------------------
+
+async function loadHabitatPack(characterId) {
+  try {
+    const response = await fetch(`/api/v1/characters/${encodeURIComponent(characterId)}/pack`, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const pack = payload?.pack;
+    if (!pack?.sprite || !pack?.animations) throw new Error('Malformed character pack');
+    habitatPack = pack;
+    if (!habitatPlayer) {
+      habitatPlayer = createFramePlayer({
+        element: habitatSprite,
+        getAnimation: () => lastPetState?.animation || 'idle',
+      });
+    }
+    habitatPlayer.load(pack);
+    habitatSprite.setAttribute('aria-label', `${pack.name} sprite`);
+    return pack;
+  } catch {
+    habitatPack = null;
+    if (habitatMode === 'owned') {
+      habitatEmpty.hidden = false;
+      habitatEmptyTitle.textContent = 'Sprite preview unavailable.';
+      habitatEmptyNote.textContent = 'The character pack could not be loaded from the local runtime. Emotes and status still work.';
+    }
+    return null;
+  }
+}
+
+function clearHabitatCaption() {
+  if (captionHideTimer) window.clearTimeout(captionHideTimer);
+  captionHideTimer = null;
+  habitatCaption.hidden = true;
+}
+
+function setHabitatMode(next) {
+  if (habitatMode === next) return;
+  const previous = habitatMode;
+  habitatMode = next;
+  const owned = next === 'owned';
+  habitatSprite.hidden = !owned;
+  habitatEmpty.hidden = owned;
+  habitatCaption.hidden = !owned;
+  bringToHabitatButton.disabled = next !== 'desktop';
+  sendToDesktopButton.disabled = !owned;
+  if (!owned) clearHabitatCaption();
+  if (next === 'owned') {
+    habitatBadge.textContent = 'DASHBOARD MODE · this tab has Sparky';
+    habitatOwnerText.textContent = 'Presentation: this dashboard tab';
+    if (previous !== 'owned') {
+      recordActivity('presentation', 'Sparky arrived in the dashboard', 'This tab now owns the live pet.');
+    }
+    return;
+  }
+  if (next === 'desktop') {
+    habitatBadge.textContent = 'DESKTOP MODE · live pet on your desktop';
+    habitatEmptyTitle.textContent = 'Sparky is wandering on your desktop.';
+    habitatEmptyNote.textContent = 'This panel never draws a second pet — bring Sparky here for the live sprite.';
+    habitatOwnerText.textContent = 'Presentation: desktop window';
+    if (previous !== null && previous !== 'desktop') {
+      recordActivity('presentation', 'Sparky returned to your desktop', 'The native window shows the live pet again.');
+    }
+    return;
+  }
+  if (next === 'claiming') {
+    habitatBadge.textContent = 'HANDING OVER · claiming Sparky…';
+    habitatEmptyTitle.textContent = 'Receiving Sparky…';
+    habitatEmptyNote.textContent = 'This tab is claiming presentation ownership from the runtime.';
+    habitatOwnerText.textContent = 'Presentation: claiming…';
+    return;
+  }
+  // 'other-tab'
+  habitatBadge.textContent = 'DASHBOARD MODE · another tab has Sparky';
+  habitatEmptyTitle.textContent = 'Another dashboard tab has Sparky.';
+  habitatEmptyNote.textContent = 'Only one tab shows the live pet. When that tab closes, this one takes over (or Sparky returns to your desktop).';
+  habitatOwnerText.textContent = 'Presentation: another dashboard tab';
+}
+
+async function claimPresentation() {
+  if (presentationInFlight) return;
+  setHabitatMode('claiming');
+  presentationInFlight = true;
+  try {
+    const response = await fetch('/api/v1/presentation/claim', {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify({ owner: presentationOwner }),
+      cache: 'no-store',
+    });
+    const result = await response.json().catch(() => null);
+    if (response.ok && result?.pet) {
+      applyPetState(result.pet);
+    } else if (response.status === 409) {
+      setHabitatMode('other-tab');
+    } else {
+      setHabitatMode('desktop');
+      habitatEmptyNote.textContent = `Could not take Sparky: ${result?.error || `HTTP ${response.status}`}.`;
+    }
+  } catch (error) {
+    setHabitatMode('desktop');
+    habitatEmptyNote.textContent = `Could not reach the local runtime: ${error.message}.`;
+  } finally {
+    presentationInFlight = false;
+  }
+}
+
+async function renewPresentation() {
+  // Renewal: same owner, same claim — extends the lease without churn.
+  if (presentationInFlight) return;
+  presentationInFlight = true;
+  try {
+    const response = await fetch('/api/v1/presentation/claim', {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify({ owner: presentationOwner }),
+      cache: 'no-store',
+    });
+    if (response.status === 409) {
+      const result = await response.json().catch(() => null);
+      if (result?.pet) applyPetState(result.pet);
+      setHabitatMode('other-tab');
+    } else if (!response.ok) {
+      // Lease kept by the server until it expires — keep polling honestly.
+      habitatOwnerText.textContent = `Presentation: renew failed (HTTP ${response.status})`;
+    }
+  } catch {
+    // Runtime briefly unreachable: the bounded lease covers a few polls.
+    habitatOwnerText.textContent = 'Presentation: renew pending (runtime unreachable)';
+  } finally {
+    presentationInFlight = false;
+  }
+}
+
+function renderHabitatCaption(state) {
+  const speech = state?.speech;
+  if (!speech || typeof speech.id !== 'number') return;
+  if (speech.id === lastHabitatSpeechId) return;
+  const speechAt = Date.parse(speech.at || '') || 0;
+  if (speechAt < habitatOwnedSince) {
+    // Claimed after this phrase already played (takeover/refresh): no replay.
+    lastHabitatSpeechId = speech.id;
+    return;
+  }
+  lastHabitatSpeechId = speech.id;
+  if (state.settings?.captions?.enabled === false) return;
+  habitatCaption.textContent = speech.text;
+  habitatCaption.classList.toggle('caption-large', state.settings?.captions?.large === true);
+  habitatCaption.hidden = false;
+  if (captionHideTimer) window.clearTimeout(captionHideTimer);
+  const duration = Number(state.settings?.captions?.durationMs) || 2600;
+  captionHideTimer = window.setTimeout(() => { habitatCaption.hidden = true; }, duration);
+}
+
+function applyPresentation(presentation) {
+  const mode = presentation?.mode === 'dashboard' ? 'dashboard' : 'desktop';
+  const now = Date.now();
+  const leaseValid = Boolean(presentation?.leaseExpiresAt) && Date.parse(presentation.leaseExpiresAt) > now;
+  const owner = presentation?.owner ?? null;
+  if (mode === 'desktop') {
+    setHabitatMode('desktop');
+    return;
+  }
+  if (owner === null) {
+    // A pending transfer (desktop sent Sparky over, or hide/lifecycle): this
+    // open tab receives it. If several tabs race, exactly one claim wins.
+    void claimPresentation();
+    return;
+  }
+  if (owner === presentationOwner && leaseValid) {
+    if (habitatMode !== 'owned') habitatOwnedSince = now;
+    setHabitatMode('owned');
+    return;
+  }
+  // Another tab's unexpired claim (or a just-expired one awaiting the
+  // daemon's ticker): show the honest notice and keep polling.
+  setHabitatMode('other-tab');
+}
+
+bringToHabitatButton.addEventListener('click', () => void claimPresentation());
+sendToDesktopButton.addEventListener('click', async () => {
+  sendToDesktopButton.disabled = true;
+  try {
+    const response = await fetch('/api/v1/presentation/release', {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify({ owner: presentationOwner }),
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result?.error || `HTTP ${response.status}`);
+    applyPetState(result.pet);
+  } catch (error) {
+    sendToDesktopButton.disabled = false;
+    commandFeedback.className = 'command-feedback error';
+    commandFeedback.textContent = error.message || 'Could not hand Sparky back to the desktop.';
+  }
+});
+
 function applyPetState(state) {
   if (!state || typeof state !== 'object') return;
   lastPetState = state;
@@ -195,10 +439,17 @@ function applyPetState(state) {
     if (document.activeElement !== speechStyleSelect) speechStyleSelect.value = ['speech', 'chirps', 'both'].includes(state.settings.speech.style) ? state.settings.speech.style : 'speech';
   }
   renderSpeechStatus(state);
-  document.querySelector('#preview-character').classList.remove('preview-idle', 'preview-wave', 'preview-dance', 'preview-sleep', 'preview-run', 'preview-celebrate');
-  const animation = ['idle', 'wave', 'dance', 'sleep', 'run', 'celebrate'].includes(state.animation) ? state.animation : 'idle';
-  document.querySelector('#preview-character').classList.add(`preview-${animation}`);
-  liveRegion.textContent = `Pet state: ${state.label || animation}. ${state.hostConnected ? 'Desktop pet connected.' : 'Desktop pet host offline.'}`;
+  // Presentation decides what this tab draws: real sprite only while owned.
+  applyPresentation(state.presentation ?? null);
+  if ((!habitatPack || habitatPack.id !== state.characterId) && state.characterId) {
+    void loadHabitatPack(state.characterId);
+  }
+  if (habitatMode === 'owned' && habitatPack && habitatPlayer) {
+    const animation = habitatPack.animations?.[state.animation] ? state.animation : 'idle';
+    habitatPlayer.play(habitatPack, animation);
+    renderHabitatCaption(state);
+  }
+  liveRegion.textContent = `Pet state: ${state.label || state.animation}. ${state.hostConnected ? 'Desktop pet connected.' : 'Desktop pet host offline.'}`;
 }
 
 async function refreshRuntime() {
@@ -224,7 +475,11 @@ async function refreshPet() {
   try {
     const response = await fetch('/api/v1/pet/state', { cache: 'no-store' });
     if (!response.ok) throw new Error('Pet state unavailable');
-    applyPetState(await response.json());
+    const state = await response.json();
+    applyPetState(state);
+    // While this tab owns the pet, renew the claim every poll — the lease
+    // stays far ahead of the ticker and a closed tab expires on its own.
+    if (habitatMode === 'owned') void renewPresentation();
   } catch {
     petHostStat.textContent = 'Unavailable';
     petHostCaption.textContent = 'Start the Sparkiee runtime';

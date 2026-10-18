@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer as createNetServer } from 'node:net';
 import { createSparkieeServer } from '../packages/server/src/server.mjs';
+import { createPackDetailProvider } from '../packages/server/src/pack-detail.mjs';
 
 async function freePort() {
   const probe = createNetServer();
@@ -429,6 +430,65 @@ test('desktop handoff endpoints require authorization and swap presentation atom
     assert.equal(back.payload.presentation.mode, 'desktop');
     assert.equal(back.payload.presentation.owner, null);
     assert.equal(back.payload.pet.visible, true);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('character pack + sprite routes serve the real pack without leaking filesystem paths', async () => {
+  const instance = await startServer({ getPackDetail: createPackDetailProvider() });
+  try {
+    const packResponse = await fetch(`http://127.0.0.1:${instance.port}/api/v1/characters/sparkiee-original/pack`);
+    assert.equal(packResponse.status, 200);
+    const { pack } = await packResponse.json();
+    assert.equal(pack.id, 'sparkiee-original');
+    // Sprite referenced through a same-origin HTTP route, never file:// or a path.
+    assert.equal(pack.sprite.url, '/api/v1/characters/sparkiee-original/sprite.png');
+    assert.ok(Number.isInteger(pack.sprite.frameWidth) && pack.sprite.frameWidth > 0);
+    assert.ok(pack.animations?.idle?.frames?.length > 0, 'idle animation present');
+    assert.equal(typeof pack.voiceStyle, 'string');
+    const raw = JSON.stringify(pack);
+    assert.equal(raw.includes('file://'), false, 'no file URLs in pack JSON');
+    assert.equal(raw.includes(process.cwd()), false, 'no absolute paths in pack JSON');
+    assert.equal(raw.includes('spriteSheetPath'), false, 'no path fields in pack JSON');
+
+    const spriteResponse = await fetch(`http://127.0.0.1:${instance.port}/api/v1/characters/sparkiee-original/sprite.png`);
+    assert.equal(spriteResponse.status, 200);
+    assert.match(spriteResponse.headers.get('content-type'), /image\/png/);
+    const bytes = Buffer.from(await spriteResponse.arrayBuffer());
+    assert.ok(bytes.length > 100, 'sprite sheet served');
+    assert.deepEqual([...bytes.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], 'PNG magic');
+
+    const unknown = await fetch(`http://127.0.0.1:${instance.port}/api/v1/characters/not-a-real-pack/pack`);
+    assert.equal(unknown.status, 404);
+
+    const malformed = await fetch(`http://127.0.0.1:${instance.port}/api/v1/characters/Bad%20Id/pack`);
+    assert.equal(malformed.status, 400);
+
+    const traversal = await fetch(`http://127.0.0.1:${instance.port}/api/v1/characters/..%2F..%2Fsecret/pack`);
+    assert.equal(traversal.status, 400, 'encoded traversal never reaches the filesystem');
+
+    const badSprite = await fetch(`http://127.0.0.1:${instance.port}/api/v1/characters/Bad%20Id/sprite.png`);
+    assert.equal(badSprite.status, 400);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('shared renderer modules are served from an exact allowlist', async () => {
+  const instance = await startServer();
+  try {
+    const shared = await fetch(`http://127.0.0.1:${instance.port}/src/lib/frame-player.mjs`);
+    assert.equal(shared.status, 200);
+    assert.match(shared.headers.get('content-type'), /javascript/);
+    const body = await shared.text();
+    assert.ok(body.includes('createFramePlayer'), 'shared frame player body');
+
+    for (const route of ['/src/lib/not-a-module.mjs', '/src/lib/main.js', '/src/server.mjs']) {
+      const denied = await fetch(`http://127.0.0.1:${instance.port}${route}`);
+      assert.equal(denied.status, 404, `${route} not served`);
+      assert.equal(denied.headers.get('content-type'), 'application/json; charset=utf-8');
+    }
   } finally {
     await close(instance.server);
   }

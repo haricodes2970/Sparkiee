@@ -14,18 +14,13 @@ import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
 import { withoutSecrets } from '../../core/src/env-safety.mjs';
 import { createVoiceService } from './voice-service.mjs';
 import { createSparkieeServer } from './server.mjs';
-import os from 'node:os';
+import { CHARACTER_ROOTS, createPackDetailProvider } from './pack-detail.mjs';
 
 const paths = resolveRuntimePaths();
 const port = resolvePort();
 const host = '127.0.0.1';
 const require = createRequire(import.meta.url);
 const PET_APP_DIR = fileURLToPath(new URL('../../pet-host/', import.meta.url));
-const CHARACTER_ROOTS = [
-  // repo-relative bundled packs: packages/server/src -> repo root
-  fileURLToPath(new URL('../../../assets/characters/', import.meta.url)),
-  path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'sparkiee', 'characters'),
-];
 const petDisabled = process.env.SPARKIEE_DISABLE_PET === '1';
 const noDisplay = process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
 const hostTracker = createHostTracker({ disabled: petDisabled, noDisplay });
@@ -58,6 +53,12 @@ async function describeCharacters() {
 let httpServer;
 let petHost;
 let shuttingDown = false;
+
+// Pack detail for the dashboard habitat lives in pack-detail.mjs (shared
+// with tests): same validated manifest summary the pet host renders, but
+// with the sprite referenced through a same-origin HTTP route instead of a
+// file:// URL. The sprite path itself only ever stays inside this process.
+const getPackDetail = createPackDetailProvider();
 
 // ---------------------------------------------------------------------------
 // Voice configuration holder: cached so callers can read it synchronously,
@@ -289,6 +290,7 @@ async function main() {
       return packs.find((pack) => pack.id === 'sparkiee-original') ?? packs[0] ?? null;
     },
     getCharacters: () => describeCharacters(),
+    getPackDetail,
     voiceService,
     refreshVoiceConfig: () => refreshVoiceConfig(),
     isVoiceReady: () => getVoiceConfig().configured === true,

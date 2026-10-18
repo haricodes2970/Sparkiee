@@ -9,6 +9,7 @@ import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLi
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 
 const DASHBOARD_ROOT = fileURLToPath(new URL('../../dashboard/', import.meta.url));
+const SHARED_LIB_ROOT = fileURLToPath(new URL('../../pet-host/renderer/lib/', import.meta.url));
 const STATIC_FILES = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
@@ -16,6 +17,16 @@ const STATIC_FILES = new Map([
   ['/src/styles.css', ['src/styles.css', 'text/css; charset=utf-8']],
   ['/src/pet-controls.css', ['src/pet-controls.css', 'text/css; charset=utf-8']],
 ]);
+// Browser-safe renderer modules the dashboard imports directly from the
+// pet renderer library — one frame player, one policy set, one caption
+// controller for both surfaces. Only these exact filenames are served.
+const SHARED_LIB_FILES = new Map([
+  ['/src/lib/frame-player.mjs', ['frame-player.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/lib/speech-policy.mjs', ['speech-policy.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/lib/caption.mjs', ['caption.mjs', 'text/javascript; charset=utf-8']],
+  ['/src/lib/audio-engine.mjs', ['audio-engine.mjs', 'text/javascript; charset=utf-8']],
+]);
+const CHARACTER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{1,63}$/;
 
 function sendJson(response, status, value) {
   const body = JSON.stringify(value);
@@ -69,13 +80,13 @@ function isSameOriginDashboardRequest(request, port) {
   }
 }
 
-async function serveStatic(response, route) {
-  const target = STATIC_FILES.get(route);
+async function serveStatic(response, route, files, rootPath) {
+  const target = files.get(route);
   if (!target) return false;
   const [relativePath, contentType] = target;
-  const rootPath = path.resolve(DASHBOARD_ROOT);
-  const fullPath = path.resolve(rootPath, relativePath);
-  if (!fullPath.startsWith(`${rootPath}${path.sep}`) && fullPath !== path.resolve(rootPath, 'index.html')) {
+  const root = path.resolve(rootPath);
+  const fullPath = path.resolve(root, relativePath);
+  if (!fullPath.startsWith(`${root}${path.sep}`) && fullPath !== path.resolve(root, 'index.html')) {
     sendJson(response, 400, { error: 'Invalid asset path' });
     return true;
   }
@@ -98,6 +109,12 @@ async function serveStatic(response, route) {
   return true;
 }
 
+/** Serve a dashboard file, then any allowlisted shared renderer module. */
+async function serveFrontendAsset(response, route) {
+  if (await serveStatic(response, route, STATIC_FILES, DASHBOARD_ROOT)) return true;
+  return serveStatic(response, route, SHARED_LIB_FILES, SHARED_LIB_ROOT);
+}
+
 function presentationErrorStatus(error) {
   if (error?.code === 'PRESENTATION_OWNED') return 409;
   if (typeof error?.code === 'string' && error.code.startsWith('INVALID_')) return 400;
@@ -115,6 +132,7 @@ export function createSparkieeServer({
   onRestartHost = () => {},
   getCharacterInfo = () => null,
   getCharacters = () => ({ packs: [], invalid: [] }),
+  getPackDetail = async () => null,
   voiceService = null,
   refreshVoiceConfig = async () => ({ configured: false, warnings: [] }),
   isVoiceReady = () => false,
@@ -521,6 +539,49 @@ export function createSparkieeServer({
       sendJson(response, 200, await getCharacters());
       return;
     }
+    // -------------------------------------------------------------------------
+    // Character assets for the dashboard habitat: validated character ids only
+    // (never arbitrary paths). The pack JSON references the sprite through a
+    // same-origin HTTP route; the loader guarantees the sprite file sits
+    // inside its pack directory, and no filesystem path ever appears in a
+    // response body.
+    // -------------------------------------------------------------------------
+    const characterAssetMatch = /^\/api\/v1\/characters\/([^/]+)(\/pack|\/sprite\.png)$/.exec(pathname);
+    if (method === 'GET' && characterAssetMatch) {
+      const characterId = characterAssetMatch[1];
+      if (!CHARACTER_ID_PATTERN.test(characterId)) {
+        sendJson(response, 400, { error: 'Invalid character id.' });
+        return;
+      }
+      let detail = null;
+      try {
+        detail = await getPackDetail(characterId);
+      } catch {
+        detail = null;
+      }
+      if (!detail) {
+        sendJson(response, 404, { error: 'Character pack not found.' });
+        return;
+      }
+      if (characterAssetMatch[2] === '/pack') {
+        sendJson(response, 200, { pack: detail.summary });
+        return;
+      }
+      try {
+        const info = await stat(detail.spritePath);
+        if (!info.isFile() || !detail.spritePath.endsWith('.png')) throw new Error('Not a sprite sheet');
+        response.writeHead(200, {
+          'content-type': 'image/png',
+          'content-length': info.size,
+          'cache-control': 'private, max-age=3600',
+          'x-content-type-options': 'nosniff',
+        });
+        createReadStream(detail.spritePath).pipe(response);
+      } catch {
+        sendJson(response, 404, { error: 'Sprite sheet unavailable.' });
+      }
+      return;
+    }
     if (method === 'POST' && pathname === '/api/v1/host/restart') {
       if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
         sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
@@ -549,7 +610,7 @@ export function createSparkieeServer({
       setTimeout(() => onShutdown(), 25).unref();
       return;
     }
-    if (method === 'GET' && await serveStatic(response, pathname)) return;
+    if (method === 'GET' && await serveFrontendAsset(response, pathname)) return;
     if (method === 'OPTIONS') {
       response.writeHead(405, { allow: 'GET, POST' });
       response.end();

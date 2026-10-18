@@ -10,7 +10,7 @@
 .roam-setting{cursor:pointer;user-select:none}
 .roam-setting input{accent-color:#8c72c9}
 .host-retry{margin-top:8px}
-.pet-preview-stage.host-offline-stage .character-placeholder{opacity:.35;filter:grayscale(.7)}
+.pet-preview-stage.host-offline-stage .habitat-sprite{opacity:.35;filter:grayscale(.7)}
 .pet-preview-stage.host-offline-stage:before{content:"DESKTOP PET OFFLINE — retry from the Pet host card";position:absolute;bottom:9px;left:50%;transform:translateX(-50%);z-index:2;white-space:nowrap;font-size:8.5px;letter-spacing:.6px;font-weight:750;color:#ffbfab;border:1px solid #594139;background:#2a201fee;border-radius:5px;padding:4px 8px}
 
 /* Phase 2 additions: reactions grid, character/voice/subtitle controls. */
@@ -36,3 +36,18 @@
 .footer-dot.voice-provider-error{background:#f08080;box-shadow:0 0 6px #f08080}
 .voice-feedback{font-size:11.5px;line-height:1.5;color:#b9b1d9;min-height:14px}
 .character-picker[hidden]{display:none}
+
+/* Real-sprite habitat: the shared frame player paints the validated pack
+   into .habitat-sprite. The stage only shows this while the tab owns
+   presentation — in desktop mode it shows .habitat-empty status text
+   (never a second drawn pet). */
+.habitat-sprite{position:absolute;left:50%;top:47%;transform:translate(-50%,-50%);z-index:1;image-rendering:pixelated;background-repeat:no-repeat}
+.habitat-sprite[hidden]{display:none}
+.habitat-empty{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:1;width:82%;display:grid;gap:6px;text-align:center;padding:0 6px}
+.habitat-empty[hidden]{display:none}
+.habitat-empty strong{font-size:11.5px;line-height:1.4;color:#e6ddff}
+.habitat-empty p{margin:0;font-size:10px;line-height:1.55;color:#9a9caf}
+.habitat-caption{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);z-index:3;max-width:86%;text-align:center;font-size:10.5px;font-weight:650;line-height:1.4;color:#fff3d6;background:#14111de6;border:1px solid #4a4063;border-radius:7px;padding:5px 9px;box-shadow:0 3px 12px #0006}
+.habitat-caption[hidden]{display:none}
+.habitat-caption.caption-large{font-size:13px}
+.habitat-controls{gap:8px}

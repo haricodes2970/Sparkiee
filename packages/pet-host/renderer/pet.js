@@ -1,5 +1,6 @@
 import { createAudioEngine } from './lib/audio-engine.mjs';
 import { createCaptionController } from './lib/caption.mjs';
+import { createFramePlayer } from './lib/frame-player.mjs';
 import { shouldFallbackChirp, shouldPlayEventChirp, speechCaptionDuration } from './lib/speech-policy.mjs';
 
 const root = document.querySelector('#pet-root');
@@ -29,68 +30,14 @@ window.addEventListener('pagehide', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Sprite frame player: swaps background-position on a pixelated sheet.
-// Looping animations run until replaced; one-shot animations play once and
-// then fall back to idle frames while the state label stays put.
+// Sprite frame player: the shared frame player (same module the dashboard
+// habitat imports) renders the validated character pack onto #pet-sprite.
 // ---------------------------------------------------------------------------
 
-const spritePlayer = (() => {
-  let timer = null;
-  let playing = null;
-
-  function showFrame(pack, frameIndex) {
-    const { frameWidth, frameHeight, columns } = pack.sprite;
-    spriteEl.style.width = `${frameWidth * pack.layout.spriteScale}px`;
-    spriteEl.style.height = `${frameHeight * pack.layout.spriteScale}px`;
-    spriteEl.style.backgroundImage = `url("${pack.sprite.url}")`;
-    spriteEl.style.backgroundSize = `${frameWidth * columns * pack.layout.spriteScale}px auto`;
-    spriteEl.style.backgroundPosition =
-      `${-(frameIndex % columns) * frameWidth * pack.layout.spriteScale}px ` +
-      `${-Math.floor(frameIndex / columns) * frameHeight * pack.layout.spriteScale}px`;
-  }
-
-  function play(pack, animationId, { fallbackToIdle = true } = {}) {
-    const animation = pack.animations[animationId] || pack.animations.idle;
-    if (playing === animationId && timer !== null) return;
-    playing = animationId;
-    if (timer !== null) clearInterval(timer);
-    timer = null;
-    let step = 0;
-    showFrame(pack, animation.frames[0]);
-    if (animation.frames.length === 1 && !animation.loop) return;
-    timer = setInterval(() => {
-      step += 1;
-      if (step >= animation.frames.length) {
-        if (animation.loop) {
-          step = 0;
-        } else {
-          clearInterval(timer);
-          timer = null;
-          playing = null;
-          if (fallbackToIdle && pack.animations.idle) {
-            play(pack, 'idle', { fallbackToIdle: false });
-          }
-          return;
-        }
-      }
-      showFrame(pack, animation.frames[step]);
-    }, animation.frameMs);
-  }
-
-  return {
-    load(pack) {
-      spriteEl.classList.remove('loading');
-      playing = null;
-      if (timer !== null) clearInterval(timer);
-      timer = null;
-      play(pack, currentState?.animation || 'idle', { fallbackToIdle: false });
-    },
-    play,
-    animation() {
-      return playing;
-    },
-  };
-})();
+const spritePlayer = createFramePlayer({
+  element: spriteEl,
+  getAnimation: () => currentState?.animation || 'idle',
+});
 
 spriteEl.classList.add('loading');
 
