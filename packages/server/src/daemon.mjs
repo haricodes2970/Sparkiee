@@ -15,6 +15,7 @@ import { withoutSecrets } from '../../core/src/env-safety.mjs';
 import { createVoiceService } from './voice-service.mjs';
 import { createSparkieeServer } from './server.mjs';
 import { createMusicLibrary } from '../../core/src/music-library.mjs';
+import { createMusicPlayer } from '../../core/src/music-player.mjs';
 import { CHARACTER_ROOTS, createPackDetailProvider } from './pack-detail.mjs';
 
 const paths = resolveRuntimePaths();
@@ -53,6 +54,7 @@ async function describeCharacters() {
 }
 let httpServer;
 let petHost;
+let musicPlayerRuntime;
 let shuttingDown = false;
 
 // Pack detail for the dashboard habitat lives in pack-detail.mjs (shared
@@ -251,6 +253,13 @@ async function shutdown(reason) {
   }
   await log(`Shutting down (${reason}).`);
   await removePidIfOwned();
+  if (musicPlayerRuntime) {
+    try {
+      musicPlayerRuntime.dispose(); // stops music + releases the cvlc child
+    } catch {
+      // best effort — shutdown continues
+    }
+  }
   if (petHost && !petHost.killed) {
     petHost.kill('SIGTERM');
     const childToKill = petHost;
@@ -284,6 +293,8 @@ async function main() {
   // finishes (scannedAt null, trackCount 0).
   const musicLibrary = createMusicLibrary();
   void musicLibrary.prime().catch(() => {});
+  // One daemon-owned playback child survives desktop↔dashboard handoffs.
+  musicPlayerRuntime = createMusicPlayer({ library: musicLibrary });
   httpServer = createSparkieeServer({
     port,
     token,
@@ -301,6 +312,14 @@ async function main() {
       status: () => musicLibrary.status(),
       list: (options) => musicLibrary.list(options),
       rescan: (options) => musicLibrary.rescan(options),
+      playbackStatus: () => musicPlayerRuntime.status(),
+      play: (options) => musicPlayerRuntime.play(options),
+      pause: () => musicPlayerRuntime.pause(),
+      resume: () => musicPlayerRuntime.resume(),
+      stop: () => musicPlayerRuntime.stop(),
+      next: () => musicPlayerRuntime.next(),
+      previous: () => musicPlayerRuntime.previous(),
+      updateSettings: (payload) => musicPlayerRuntime.updateSettings(payload),
     },
     voiceService,
     refreshVoiceConfig: () => refreshVoiceConfig(),

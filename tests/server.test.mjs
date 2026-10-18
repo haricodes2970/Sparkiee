@@ -608,3 +608,166 @@ test('music rescan requires the dashboard or token; missing service is an honest
     await close(bare.server);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Music transport endpoints: gated, id-only play, honest error mapping.
+// ---------------------------------------------------------------------------
+
+function playbackStub(overrides = {}) {
+  const playing = {
+    phase: 'playing',
+    track: { id: 'a1b2c3d4e5f60718', name: 'Madira', title: 'Madira', artist: null, durationMs: 169_846 },
+    positionMs: 1200,
+    durationMs: 169_846,
+    volume: 0.8,
+    muted: false,
+    shuffle: false,
+    ducked: false,
+    queueLength: 19,
+    engine: { backend: 'cvlc', available: true, detail: null },
+    lastError: null,
+  };
+  return {
+    status: () => ({ trackCount: 19, formats: ['mp3'], roots: [{ path: '/home/hari007/Music', available: true }], scannedAt: 'x', rescanInFlight: false, lastError: null }),
+    list: async () => ({ tracks: [], total: 0, query: '' }),
+    rescan: async () => ({ trackCount: 19 }),
+    playbackStatus: () => ({ ...playing, phase: 'stopped' }),
+    play: async ({ trackId }) => {
+      if (!/^[0-9a-f]{16}$/.test(trackId)) {
+        const error = new Error('trackId must be an opaque 16-character library id.');
+        error.code = 'INVALID_TRACK';
+        throw error;
+      }
+      if (trackId === 'a1b2c3d4e5f60718') return playing;
+      const error = new Error('That track is not in the library (it may have been removed).');
+      error.code = 'TRACK_NOT_FOUND';
+      throw error;
+    },
+    pause: async () => ({ ...playing, phase: 'paused' }),
+    resume: async () => playing,
+    stop: async () => ({ ...playing, phase: 'stopped', track: null, positionMs: 0 }),
+    next: async () => playing,
+    previous: async () => playing,
+    updateSettings: async (payload) => {
+      if (payload.volume !== undefined && (payload.volume < 0 || payload.volume > 1)) {
+        const error = new Error('volume must be a number between 0 and 1.');
+        error.code = 'INVALID_VOLUME';
+        throw error;
+      }
+      return { ...playing, ...payload };
+    },
+    ...overrides,
+  };
+}
+
+test('music transport is auth-gated, id-only, and maps errors truthfully', async () => {
+  const instance = await startServer({ musicService: playbackStub() });
+  try {
+    const headers = {
+      'content-type': 'application/json',
+      authorization: `Bearer ${instance.token}`,
+    };
+    // No auth → 403 on every state-changing op.
+    const anon = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/play`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ trackId: 'a1b2c3d4e5f60718' }),
+    });
+    assert.equal(anon.status, 403);
+
+    // Path-shaped payloads are rejected before any engine call.
+    const pathPayload = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/play`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ trackId: '/home/hari007/Music/SeedheMauth/Madira.mp3' }),
+    });
+    assert.equal(pathPayload.status, 400, 'absolute path is not an opaque id → rejected');
+    const pathBody = await pathPayload.json();
+    assert.ok(!pathBody.error.includes('/home/hari007/Music'), 'error never echoes a path');
+
+    const missingBody = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/play`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({}),
+    });
+    assert.equal(missingBody.status, 400);
+
+    const ok = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/play`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ trackId: 'a1b2c3d4e5f60718' }),
+    });
+    assert.equal(ok.status, 200);
+    const okBody = await ok.json();
+    assert.equal(okBody.playback.phase, 'playing');
+    assert.equal(okBody.playback.track.name, 'Madira');
+
+    for (const op of ['pause', 'next', 'previous', 'stop']) {
+      const response = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/${op}`, {
+        method: 'POST',
+        headers,
+        body: '{}',
+      });
+      assert.equal(response.status, 200, `${op} succeeds`);
+    }
+
+    // Settings: strict shape in, honest 400 for out-of-range volume.
+    const badVolume = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/settings`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ volume: 2 }),
+    });
+    assert.equal(badVolume.status, 400);
+    const badType = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/settings`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ muted: 'loud' }),
+    });
+    assert.equal(badType.status, 400);
+    const goodSettings = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/settings`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ volume: 0.4, shuffle: true }),
+    });
+    assert.equal(goodSettings.status, 200);
+    const settingsBody = await goodSettings.json();
+    assert.equal(settingsBody.playback.volume, 0.4);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('music status includes an honest playback block and 503s without a player', async () => {
+  const withPlayer = await startServer({ musicService: playbackStub() });
+  const withoutPlayer = await startServer({ musicService: playbackStub({ playbackStatus: undefined }) });
+  try {
+    const payload = await (await fetch(`http://127.0.0.1:${withPlayer.port}/api/v1/music/status`)).json();
+    assert.equal(payload.playback.phase, 'stopped');
+    assert.equal(payload.playback.engine.backend, 'cvlc');
+    assert.ok(payload.music.trackCount >= 0);
+
+    const barePayload = await (await fetch(`http://127.0.0.1:${withoutPlayer.port}/api/v1/music/status`)).json();
+    assert.equal(barePayload.playback, null, 'no player attached → null, never invented');
+
+    // A runtime without any music service answers transport with 503, never
+    // a fake success or a 404 that would imply the route does not exist.
+    const bare = await startServer();
+    try {
+      const gated = await fetch(`http://127.0.0.1:${bare.port}/api/v1/music/stop`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          origin: `http://127.0.0.1:${bare.port}`,
+          host: `127.0.0.1:${bare.port}`,
+        },
+        body: '{}',
+      });
+      assert.equal(gated.status, 503);
+    } finally {
+      await close(bare.server);
+    }
+  } finally {
+    await close(withPlayer.server);
+    await close(withoutPlayer.server);
+  }
+});

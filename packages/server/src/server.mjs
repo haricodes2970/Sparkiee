@@ -592,7 +592,11 @@ export function createSparkieeServer({
         sendJson(response, 503, { error: 'Music library unavailable.' });
         return;
       }
-      sendJson(response, 200, { ok: true, music: await musicService.status() });
+      sendJson(response, 200, {
+        ok: true,
+        music: await musicService.status(),
+        playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
+      });
       return;
     }
     if (method === 'GET' && pathname === '/api/v1/music/library') {
@@ -630,6 +634,95 @@ export function createSparkieeServer({
         return;
       }
       sendJson(response, 200, { ok: true, music: await musicService.rescan({ force: true }) });
+      return;
+    }
+    // Transport: state-changing, so every op carries the dashboard/token gate.
+    // Play accepts an opaque track id only — never a filesystem path.
+    const transportPaths = {
+      '/api/v1/music/play': 'play',
+      '/api/v1/music/pause': 'pause',
+      '/api/v1/music/resume': 'resume',
+      '/api/v1/music/stop': 'stop',
+      '/api/v1/music/next': 'next',
+      '/api/v1/music/previous': 'previous',
+    };
+    if (method === 'POST' && transportPaths[pathname]) {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!musicService) {
+        sendJson(response, 503, { error: 'Music playback unavailable.' });
+        return;
+      }
+      let payload = {};
+      if (transportPaths[pathname] === 'play') {
+        try {
+          payload = await readJsonBody(request);
+        } catch (error) {
+          sendJson(response, error.statusCode ?? 400, { error: error.message });
+          return;
+        }
+        if (!payload || typeof payload.trackId !== 'string') {
+          sendJson(response, 400, { error: 'play requires { trackId } — an opaque library id, not a path.' });
+          return;
+        }
+      }
+      try {
+        const playback = await musicService[transportPaths[pathname]]({ trackId: payload?.trackId });
+        sendJson(response, 200, { ok: true, playback });
+      } catch (error) {
+        const statusByCode = {
+          INVALID_TRACK: 400,
+          TRACK_NOT_FOUND: 404,
+          INVALID_STATE: 409,
+          ENGINE_UNAVAILABLE: 503,
+        };
+        sendJson(response, statusByCode[error?.code] ?? 500, {
+          error: error?.message ?? 'Music transport failed.',
+          playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
+        });
+      }
+      return;
+    }
+    if (method === 'PUT' && pathname === '/api/v1/music/settings') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!musicService) {
+        sendJson(response, 503, { error: 'Music playback unavailable.' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!payload || typeof payload !== 'object'
+        || (payload.volume !== undefined && typeof payload.volume !== 'number')
+        || (payload.muted !== undefined && typeof payload.muted !== 'boolean')
+        || (payload.shuffle !== undefined && typeof payload.shuffle !== 'boolean')) {
+        sendJson(response, 400, { error: 'Expected { volume?: number, muted?: boolean, shuffle?: boolean }.' });
+        return;
+      }
+      try {
+        const playback = await musicService.updateSettings(payload);
+        sendJson(response, 200, { ok: true, playback });
+      } catch (error) {
+        const statusByCode = {
+          INVALID_VOLUME: 400,
+          INVALID_MUTED: 400,
+          INVALID_SHUFFLE: 400,
+          ENGINE_UNAVAILABLE: 503,
+        };
+        sendJson(response, statusByCode[error?.code] ?? 500, {
+          error: error?.message ?? 'Music settings failed.',
+          playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
+        });
+      }
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/host/restart') {
