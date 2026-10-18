@@ -132,6 +132,7 @@ export function createSparkieeServer({
   getCharacterInfo = () => null,
   getCharacters = () => ({ packs: [], invalid: [] }),
   getPackDetail = async () => null,
+  musicService = null,
   voiceService = null,
   refreshVoiceConfig = async () => ({ configured: false, warnings: [] }),
   isVoiceReady = () => false,
@@ -579,6 +580,56 @@ export function createSparkieeServer({
       } catch {
         sendJson(response, 404, { error: 'Sprite sheet unavailable.' });
       }
+      return;
+    }
+    // -------------------------------------------------------------------------
+    // Music library: read-only views are public on loopback (like pet state);
+    // the rescan walks the filesystem, so it carries the dashboard/token gate.
+    // Responses expose opaque ids and display metadata — never file paths.
+    // -------------------------------------------------------------------------
+    if (method === 'GET' && pathname === '/api/v1/music/status') {
+      if (!musicService) {
+        sendJson(response, 503, { error: 'Music library unavailable.' });
+        return;
+      }
+      sendJson(response, 200, { ok: true, music: await musicService.status() });
+      return;
+    }
+    if (method === 'GET' && pathname === '/api/v1/music/library') {
+      if (!musicService) {
+        sendJson(response, 503, { error: 'Music library unavailable.' });
+        return;
+      }
+      let query = '';
+      let limit;
+      try {
+        const search = new URL(request.url ?? '/', 'http://127.0.0.1').searchParams;
+        query = search.get('q') ?? '';
+        if (search.has('limit')) limit = Number(search.get('limit'));
+      } catch {
+        // fall through with defaults
+      }
+      if (typeof query !== 'string' || query.length > 200) {
+        sendJson(response, 400, { error: 'Query must be a string of at most 200 characters.' });
+        return;
+      }
+      if (limit !== undefined && (!Number.isFinite(limit) || limit < 1 || limit > 500)) {
+        sendJson(response, 400, { error: 'limit must be between 1 and 500.' });
+        return;
+      }
+      sendJson(response, 200, { ok: true, ...(await musicService.list({ query, limit })) });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/music/scan') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!musicService) {
+        sendJson(response, 503, { error: 'Music library unavailable.' });
+        return;
+      }
+      sendJson(response, 200, { ok: true, music: await musicService.rescan({ force: true }) });
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/host/restart') {

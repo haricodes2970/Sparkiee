@@ -14,6 +14,7 @@ import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
 import { withoutSecrets } from '../../core/src/env-safety.mjs';
 import { createVoiceService } from './voice-service.mjs';
 import { createSparkieeServer } from './server.mjs';
+import { createMusicLibrary } from '../../core/src/music-library.mjs';
 import { CHARACTER_ROOTS, createPackDetailProvider } from './pack-detail.mjs';
 
 const paths = resolveRuntimePaths();
@@ -278,6 +279,11 @@ async function main() {
     cache: voiceCache,
     petController,
   });
+  // Read-only MP3 library over ~/Music (SPARKIEE_MUSIC_ROOTS overrides).
+  // The initial scan runs in the background; status stays honest until it
+  // finishes (scannedAt null, trackCount 0).
+  const musicLibrary = createMusicLibrary();
+  void musicLibrary.prime().catch(() => {});
   httpServer = createSparkieeServer({
     port,
     token,
@@ -291,6 +297,11 @@ async function main() {
     },
     getCharacters: () => describeCharacters(),
     getPackDetail,
+    musicService: {
+      status: () => musicLibrary.status(),
+      list: (options) => musicLibrary.list(options),
+      rescan: (options) => musicLibrary.rescan(options),
+    },
     voiceService,
     refreshVoiceConfig: () => refreshVoiceConfig(),
     isVoiceReady: () => getVoiceConfig().configured === true,

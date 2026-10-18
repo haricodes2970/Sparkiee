@@ -493,3 +493,118 @@ test('shared renderer modules are served from an exact allowlist', async () => {
     await close(instance.server);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Music library endpoints: loopback-public reads, gated rescan, honest 503
+// when no library is attached, and zero filesystem paths in responses.
+// ---------------------------------------------------------------------------
+
+function musicServiceStub(overrides = {}) {
+  const status = {
+    roots: [{ path: '/home/hari007/Music', available: true }],
+    formats: ['mp3'],
+    trackCount: 19,
+    scannedAt: '2026-10-18T12:00:00.000Z',
+    rescanInFlight: false,
+    lastError: null,
+  };
+  return {
+    status: () => status,
+    list: async ({ query = '' }) => ({
+      tracks: [{
+        id: 'a1b2c3d4e5f60718',
+        name: 'Madira',
+        title: 'Madira',
+        artist: null,
+        album: null,
+        durationMs: 169_846,
+        sizeBytes: 5_587_341,
+        file: 'Madira.mp3',
+        available: true,
+      }],
+      total: 1,
+      query: String(query),
+    }),
+    rescan: async () => status,
+    ...overrides,
+  };
+}
+
+test('music status and library are readable on loopback and leak no paths', async () => {
+  const instance = await startServer({ musicService: musicServiceStub() });
+  try {
+    const statusResponse = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/status`);
+    assert.equal(statusResponse.status, 200);
+    const statusPayload = await statusResponse.json();
+    assert.equal(statusPayload.music.trackCount, 19);
+    assert.deepEqual(statusPayload.music.formats, ['mp3']);
+    assert.equal(statusPayload.music.roots[0].path, '/home/hari007/Music', 'root is explicit and visible');
+
+    const libraryResponse = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/library?q=madira`);
+    assert.equal(libraryResponse.status, 200);
+    const libraryPayload = await libraryResponse.json();
+    assert.equal(libraryPayload.tracks[0].name, 'Madira');
+    assert.equal(libraryPayload.query, 'madira');
+    const raw = JSON.stringify(libraryPayload);
+    assert.equal(raw.includes('/home/hari007/Music/SeedheMauth'), false, 'no indexed file paths');
+    assert.equal(raw.includes('file://'), false);
+
+    const badLimit = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/library?limit=999`);
+    assert.equal(badLimit.status, 400);
+    const longQuery = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/library?q=${'x'.repeat(201)}`);
+    assert.equal(longQuery.status, 400);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('music rescan requires the dashboard or token; missing service is an honest 503', async () => {
+  const rescanCalls = { count: 0 };
+  const instance = await startServer({
+    musicService: musicServiceStub({ rescan: async () => {
+      rescanCalls.count += 1;
+      return { trackCount: 19, rescanInFlight: false };
+    } }),
+  });
+  const bare = await startServer(); // no musicService at all
+  try {
+    const forbidden = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/scan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(forbidden.status, 403);
+    assert.equal(rescanCalls.count, 0);
+
+    const withToken = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/scan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` },
+      body: '{}',
+    });
+    assert.equal(withToken.status, 200);
+    assert.equal(rescanCalls.count, 1);
+
+    const sameOrigin = await fetch(`http://127.0.0.1:${instance.port}/api/v1/music/scan`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: `http://127.0.0.1:${instance.port}`,
+        host: `127.0.0.1:${instance.port}`,
+      },
+      body: '{}',
+    });
+    assert.equal(sameOrigin.status, 200);
+
+    const missing = await fetch(`http://127.0.0.1:${bare.port}/api/v1/music/status`);
+    assert.equal(missing.status, 503);
+    const missingScan = await fetch(`http://127.0.0.1:${bare.port}/api/v1/music/scan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${bare.port}`, host: `127.0.0.1:${bare.port}` },
+      body: '{}',
+    });
+    assert.equal(missingScan.status, 503);
+  } finally {
+    await close(instance.server);
+    await close(bare.server);
+  }
+});
