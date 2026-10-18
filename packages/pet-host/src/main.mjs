@@ -1,21 +1,34 @@
 import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createMovementController } from './movement.mjs';
+import { listCharacterPacks } from '../../core/src/character-pack.mjs';
+import { COMMAND_VOICE_EVENTS } from '../../core/src/pet-state.mjs';
 
 const APP_DIR = fileURLToPath(new URL('../', import.meta.url));
 const PET_PAGE = path.join(APP_DIR, 'renderer', 'index.html');
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.SPARKIEE_PORT || 2005);
 const TOKEN = process.env.SPARKIEE_RUNTIME_TOKEN;
-const VALID_COMMANDS = new Set(['idle', 'walk', 'run', 'dance', 'sleep', 'celebrate', 'wave', 'surprised', 'hide', 'show']);
+const VALID_COMMANDS = new Set(['idle', 'walk', 'run', 'dance', 'sleep', 'celebrate', 'wave', 'surprised', 'confused', 'thinking', 'task_complete', 'task_error', 'permission_required', 'hide', 'show']);
 const POLL_MS = 900;
+const PACK_ROOTS = [
+  // repo-relative bundled packs: packages/pet-host/src -> repo root
+  fileURLToPath(new URL('../../../assets/characters/', import.meta.url)),
+  path.join(
+    process.env.XDG_DATA_HOME || path.join(process.env.HOME || '', '.local', 'share'),
+    'sparkiee',
+    'characters',
+  ),
+];
 let petWindow;
 let pollTimer;
 let lastState = '';
 let latestState = null;
 let dragOrigin = null;
 let movement;
+let currentPack = null;
+let loadedPackId = null;
 
 if (process.platform === 'linux' && process.env.SPARKIEE_OZONE_PLATFORM !== 'wayland') {
   // Phase 0 selected XWayland for GNOME because the pet needs window positioning.
@@ -60,20 +73,91 @@ function reactToMovement(state) {
     movement.start('walk');
     return;
   }
+  // Dance, sleep, celebrate, thinking, reactions, etc. keep the pet
+  // in place until the state changes again.
   movement.stop();
+}
+
+// ---------------------------------------------------------------------------
+// Character pack loading (bundled repo packs + user-local packs)
+// ---------------------------------------------------------------------------
+
+function buildPackSummary(pack) {
+  return {
+    id: pack.id,
+    name: pack.name,
+    sprite: {
+      url: pathToFileURL(pack.spriteSheetPath).href,
+      frameWidth: pack.spriteSheet.frameWidth,
+      frameHeight: pack.spriteSheet.frameHeight,
+      columns: pack.spriteSheet.columns,
+    },
+    animations: pack.animations,
+    layout: {
+      windowWidth: pack.layout.windowWidth,
+      windowHeight: pack.layout.windowHeight,
+      spriteScale: pack.layout.spriteScale,
+      captionDurationMs: pack.layout.captionDurationMs,
+      captionMaxLines: pack.layout.captionMaxLines,
+    },
+    voiceStyle: pack.voice.style,
+    voiceEvents: pack.voice.events,
+    commandVoiceEvents: COMMAND_VOICE_EVENTS,
+  };
+}
+
+async function loadCharacterPackById(characterId) {
+  const { packs } = await listCharacterPacks(PACK_ROOTS);
+  const wanted = typeof characterId === 'string' ? characterId : null;
+  const pack = packs.find((candidate) => candidate.id === wanted)
+    ?? packs.find((candidate) => candidate.id === 'sparkiee-original')
+    ?? packs[0]
+    ?? null;
+  return pack;
+}
+
+async function reloadPackForState(state) {
+  const wanted = state?.settings?.characterId;
+  // Only reload when an explicit, different character is requested.
+  if (loadedPackId !== null && (wanted === undefined || wanted === null || wanted === loadedPackId)) return;
+  const pack = await loadCharacterPackById(wanted);
+  if (!pack) return;
+  const switched = loadedPackId !== null && loadedPackId !== pack.id;
+  loadedPackId = pack.id;
+  currentPack = buildPackSummary(pack);
+  if (petWindow && !petWindow.isDestroyed()) {
+    if (switched) applyWindowLayout(currentPack.layout);
+    petWindow.webContents.send('pet:pack', currentPack);
+  }
+}
+
+function applyWindowLayout(layout) {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  const width = Math.round(layout.windowWidth);
+  const height = Math.round(layout.windowHeight);
+  const [oldX, oldY] = petWindow.getPosition();
+  const old = petWindow.getBounds();
+  const centerX = oldX + old.width / 2;
+  const centerY = oldY + old.height / 2;
+  const { workArea } = screen.getDisplayMatching(old);
+  const x = Math.min(Math.max(workArea.x, Math.round(centerX - width / 2)), workArea.x + workArea.width - width);
+  const y = Math.min(Math.max(workArea.y, Math.round(centerY - height / 2)), workArea.y + workArea.height - height);
+  petWindow.setBounds({ x, y, width, height }, false);
 }
 
 function publishState(state) {
   latestState = state;
   const serialised = JSON.stringify(state);
-  if (serialised === lastState) return;
-  lastState = serialised;
-  if (petWindow && !petWindow.isDestroyed()) {
-    petWindow.webContents.send('pet:state', state);
-    if (state.visible && !petWindow.isVisible()) petWindow.showInactive();
-    if (!state.visible && petWindow.isVisible()) petWindow.hide();
+  if (serialised !== lastState) {
+    lastState = serialised;
+    if (petWindow && !petWindow.isDestroyed()) {
+      petWindow.webContents.send('pet:state', state);
+      if (state.visible && !petWindow.isVisible()) petWindow.showInactive();
+      if (!state.visible && petWindow.isVisible()) petWindow.hide();
+    }
+    reactToMovement(state);
+    void reloadPackForState(state);
   }
-  reactToMovement(state);
 }
 
 async function pollState() {
@@ -117,8 +201,8 @@ function movePetFromPointer(point) {
 
 function createPetWindow() {
   const { workArea } = screen.getPrimaryDisplay();
-  const width = 204;
-  const height = 220;
+  const width = currentPack?.layout?.windowWidth ?? 220;
+  const height = currentPack?.layout?.windowHeight ?? 300;
   const pet = new BrowserWindow({
     width,
     height,
@@ -154,12 +238,16 @@ function createPetWindow() {
   pet.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith('file://')) event.preventDefault();
   });
+  pet.webContents.on('did-finish-load', () => {
+    if (currentPack) pet.webContents.send('pet:pack', currentPack);
+  });
   pet.loadFile(PET_PAGE);
   return pet;
 }
 
 ipcMain.handle('pet:command', async (_event, command) => sendCommand(command));
 ipcMain.handle('pet:get-state', () => latestState);
+ipcMain.handle('pet:get-pack', () => currentPack);
 ipcMain.on('pet:drag-start', (event, point) => {
   if (!isPointerPoint(point) || !petWindow || event.sender !== petWindow.webContents) return;
   const [windowX, windowY] = petWindow.getPosition();
@@ -183,6 +271,7 @@ app.whenReady().then(async () => {
     app.quit();
     return;
   }
+  await reloadPackForState(null).catch(() => {});
   petWindow = createPetWindow();
   movement = createMovementController({
     getBounds: () => petWindow.getBounds(),
@@ -202,6 +291,7 @@ app.on('before-quit', () => {
   movement?.stop();
   ipcMain.removeHandler('pet:command');
   ipcMain.removeHandler('pet:get-state');
+  ipcMain.removeHandler('pet:get-pack');
   ipcMain.removeAllListeners('pet:drag-start');
   ipcMain.removeAllListeners('pet:drag-move');
   ipcMain.removeAllListeners('pet:drag-end');

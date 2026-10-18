@@ -1,29 +1,112 @@
 const root = document.querySelector('#pet-root');
-const bubble = document.querySelector('#speech-bubble');
-const statusText = document.querySelector('#bubble-status');
-const messageText = document.querySelector('#bubble-message');
+const spriteEl = document.querySelector('#pet-sprite');
+const statusText = document.querySelector('#pet-status');
+const captionBox = document.querySelector('#caption-box');
+const captionText = document.querySelector('#caption-text');
 const connectionDot = document.querySelector('#connection-dot');
 const errorText = document.querySelector('#pet-error');
 const petButton = document.querySelector('#pet-button');
-const commandButtons = document.querySelectorAll('[data-command]');
-let currentState;
+let currentState = null;
+let currentPack = null;
 let pointerStart = null;
 let dragged = false;
 
-const ANIMATIONS = new Set(['idle', 'walk', 'run', 'dance', 'sleep', 'celebrate', 'wave', 'surprised']);
+// ---------------------------------------------------------------------------
+// Sprite frame player: swaps background-position on a pixelated sheet.
+// Looping animations run until replaced; one-shot animations play once and
+// then fall back to idle frames while the state label stays put.
+// ---------------------------------------------------------------------------
+
+const spritePlayer = (() => {
+  let timer = null;
+  let playing = null;
+
+  function showFrame(pack, frameIndex) {
+    const { frameWidth, frameHeight, columns } = pack.sprite;
+    spriteEl.style.width = `${frameWidth * pack.layout.spriteScale}px`;
+    spriteEl.style.height = `${frameHeight * pack.layout.spriteScale}px`;
+    spriteEl.style.backgroundImage = `url("${pack.sprite.url}")`;
+    spriteEl.style.backgroundSize = `${frameWidth * columns * pack.layout.spriteScale}px auto`;
+    spriteEl.style.backgroundPosition =
+      `${-(frameIndex % columns) * frameWidth * pack.layout.spriteScale}px ` +
+      `${-Math.floor(frameIndex / columns) * frameHeight * pack.layout.spriteScale}px`;
+  }
+
+  function play(pack, animationId, { fallbackToIdle = true } = {}) {
+    const animation = pack.animations[animationId] || pack.animations.idle;
+    if (playing === animationId && timer !== null) return;
+    playing = animationId;
+    if (timer !== null) clearInterval(timer);
+    timer = null;
+    let step = 0;
+    showFrame(pack, animation.frames[0]);
+    if (animation.frames.length === 1 && !animation.loop) return;
+    timer = setInterval(() => {
+      step += 1;
+      if (step >= animation.frames.length) {
+        if (animation.loop) {
+          step = 0;
+        } else {
+          clearInterval(timer);
+          timer = null;
+          playing = null;
+          if (fallbackToIdle && pack.animations.idle) {
+            play(pack, 'idle', { fallbackToIdle: false });
+          }
+          return;
+        }
+      }
+      showFrame(pack, animation.frames[step]);
+    }, animation.frameMs);
+  }
+
+  return {
+    load(pack) {
+      spriteEl.classList.remove('loading');
+      playing = null;
+      if (timer !== null) clearInterval(timer);
+      timer = null;
+      play(pack, currentState?.animation || 'idle', { fallbackToIdle: false });
+    },
+    play,
+    animation() {
+      return playing;
+    },
+  };
+})();
+
+spriteEl.classList.add('loading');
+
+// ---------------------------------------------------------------------------
+// State application
+// ---------------------------------------------------------------------------
 
 function applyState(state) {
   if (!state || typeof state !== 'object') return;
+  const previous = currentState;
   currentState = state;
-  root.classList.remove(...[...ANIMATIONS].map((item) => `animation-${item}`));
-  const animation = ANIMATIONS.has(state.animation) ? state.animation : 'idle';
-  root.classList.add(`animation-${animation}`);
-  statusText.textContent = String(state.label || 'Hanging out').slice(0, 80);
-  messageText.textContent = String(state.message || 'Hey there, developer!').slice(0, 180);
+  statusText.textContent = String(state.label || 'Hanging out').toLowerCase().slice(0, 40);
   connectionDot.classList.toggle('disconnected', state.hostConnected !== true);
   document.querySelector('#pet-name').textContent = String(state.characterName || 'sparkiee').slice(0, 32).toLowerCase();
   if (state.visible === false) root.dataset.hidden = 'true';
   else delete root.dataset.hidden;
+
+  const caption = String(state.message || '').slice(0, 180);
+  if (captionText.textContent !== caption) {
+    captionText.textContent = caption;
+    captionBox.classList.remove('caption-bump');
+    void captionBox.offsetWidth; // restart the pop animation
+    captionBox.classList.add('caption-bump');
+  }
+  captionBox.classList.add('visible');
+
+  if (currentPack) {
+    const animation = currentPack.animations[state.animation] ? state.animation : 'idle';
+    spritePlayer.play(currentPack, animation);
+    if (previous && previous.animation !== state.animation) {
+      window.dispatchEvent(new CustomEvent('sparkiee:animation-changed', { detail: { from: previous.animation, to: state.animation } }));
+    }
+  }
 }
 
 async function command(name) {
@@ -32,8 +115,25 @@ async function command(name) {
     applyState(await window.sparkieePet.command(name));
   } catch {
     errorText.textContent = 'Cannot reach Sparkiee right now.';
+    errorText.hidden = false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Pack loading (manifest summary pushed by the Electron main process)
+// ---------------------------------------------------------------------------
+
+function applyPack(pack) {
+  if (!pack || typeof pack !== 'object' || !pack.sprite || !pack.animations) return;
+  currentPack = pack;
+  spritePlayer.load(pack);
+}
+window.sparkieePet.onPack(applyPack);
+window.sparkieePet.getPack().then(applyPack).catch(() => {});
+
+// ---------------------------------------------------------------------------
+// Drag + click interactions
+// ---------------------------------------------------------------------------
 
 petButton.addEventListener('pointerdown', (event) => {
   if (event.button !== 0) return;
@@ -59,13 +159,6 @@ petButton.addEventListener('click', () => {
   if (dragged) return;
   void command('wave');
 });
-for (const button of commandButtons) {
-  button.addEventListener('click', (event) => {
-    event.stopPropagation();
-    void command(button.dataset.command);
-  });
-}
-root.addEventListener('mouseenter', () => bubble.classList.add('expanded'));
-root.addEventListener('mouseleave', () => bubble.classList.remove('expanded'));
+
 window.sparkieePet.onState(applyState);
 window.sparkieePet.getState().then(applyState).catch(() => {});

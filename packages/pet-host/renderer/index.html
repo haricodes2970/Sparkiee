@@ -9,23 +9,19 @@
   <script type="module" src="./pet.js"></script>
 </head>
 <body>
-  <main id="pet-root" class="pet-root animation-idle" aria-label="Sparkiee desktop pet">
-    <div class="speech-bubble" id="speech-bubble" aria-live="polite">
-      <span class="bubble-status" id="bubble-status">Hanging out</span>
-      <span class="bubble-message" id="bubble-message">Hey there, developer!</span>
-    </div>
-    <button class="pet-button" id="pet-button" type="button" aria-label="Ask Sparkiee to wave" title="Click me for a wave">
-      <img class="pet-sprite" src="./sparkiee.svg" alt="A tiny golden pixel creature with sparkly ears and a lightning-shaped tail" draggable="false" />
-      <span class="sparkle sparkle-one">✦</span>
-      <span class="sparkle sparkle-two">✧</span>
+  <main id="pet-root" aria-label="Sparkiee desktop pet">
+    <button class="pet-button" id="pet-button" type="button" aria-label="Ask your Sparkiee pet to wave" title="Click for a wave, drag to move">
+      <div class="pet-sprite" id="pet-sprite" role="img" aria-label="Animated pixel creature"></div>
     </button>
-    <div class="pet-footer">
-      <span class="connection-dot" id="connection-dot"></span>
+    <div class="pet-name-row">
       <span id="pet-name">sparkiee</span>
-      <span class="pet-footer-spacer"></span>
-      <button class="mini-control" data-command="hide" title="Hide pet" aria-label="Hide pet">−</button>
+      <span id="pet-status" class="pet-status">hanging out</span>
+      <span id="connection-dot" class="connection-dot" title="Pet host connection"></span>
     </div>
-    <div class="pet-error" id="pet-error" role="status"></div>
+    <div class="caption-box" id="caption-box" aria-live="polite">
+      <span id="caption-text">Hey there, developer!</span>
+    </div>
+    <div class="pet-error" id="pet-error" hidden></div>
   </main>
 </body>
 </html>
