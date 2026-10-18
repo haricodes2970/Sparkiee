@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayload, PET_COMMANDS } from '../packages/core/src/pet-state.mjs';
+import { COMMAND_VOICE_EVENTS, createPetController, isValidPetCommandPayload, isValidPetSettingsPayload, PET_COMMANDS } from '../packages/core/src/pet-state.mjs';
 
 test('new pet controller begins visible and idle without a connected host', () => {
   let time = 1000;
@@ -148,4 +148,39 @@ test('settings payload validation accepts nested audio, captions, and character 
   assert.equal(isValidPetSettingsPayload({ characterId: null }), true);
   assert.equal(isValidPetSettingsPayload({ characterId: 'Bad ID' }), false);
   assert.equal(isValidPetSettingsPayload({ moveSpeed: 1, audio: { enabled: true }, captions: { large: true }, characterId: null, autoRoam: false }), true);
+});
+
+test('every animation command is accepted with a label, message, and animation', () => {
+  const pet = createPetController();
+  const animationCommands = PET_COMMANDS.filter((command) => !['hide', 'show'].includes(command));
+  assert.ok(animationCommands.length >= 13, 'all expressive commands present');
+  for (const command of animationCommands) {
+    const state = pet.command(command);
+    assert.equal(state.animation, command, `${command} maps to its animation`);
+    assert.ok(state.label && state.label.length > 0, `${command} has a label`);
+    assert.ok(state.message && state.message.length > 0, `${command} has a message`);
+  }
+  assert.equal(pet.snapshot().voice, null, 'voice stays null until triggered');
+});
+
+test('hide and show toggle visibility while preserving the animation state', () => {
+  const pet = createPetController();
+  pet.command('dance');
+  assert.equal(pet.command('hide').visible, false);
+  const shown = pet.command('show');
+  assert.equal(shown.visible, true);
+  assert.equal(shown.animation, 'dance');
+});
+
+test('command voice map pairs each reaction with a declared event and stays silent for quiet states', () => {
+  for (const [command, event] of Object.entries(COMMAND_VOICE_EVENTS)) {
+    assert.ok(PET_COMMANDS.includes(command), `${command} is a real command`);
+    assert.match(event, /^[a-z][a-z0-9_]{1,32}$/, `${event} is a valid event id`);
+  }
+  for (const quiet of ['walk', 'sleep', 'hide']) {
+    assert.equal(COMMAND_VOICE_EVENTS[quiet], undefined, `${quiet} stays silent`);
+  }
+  assert.equal(COMMAND_VOICE_EVENTS.task_complete, 'celebration');
+  assert.equal(COMMAND_VOICE_EVENTS.task_error, 'error');
+  assert.equal(COMMAND_VOICE_EVENTS.permission_required, 'attention');
 });

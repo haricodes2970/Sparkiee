@@ -310,6 +310,25 @@ test('character endpoints expose pack metadata without file paths', async () => 
   }
 });
 
+test('reaction commands flow through the pet command endpoint', async () => {
+  const instance = await startServer();
+  try {
+    for (const [command, label] of [['confused', 'Hmm?'], ['thinking', 'Thinking...'], ['task_complete', 'All done!'], ['task_error', 'Uh oh...'], ['permission_required', 'Need a hand?']]) {
+      const response = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/command`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${instance.port}` },
+        body: JSON.stringify({ command }),
+      });
+      assert.equal(response.status, 200, `${command} accepted`);
+      const payload = await response.json();
+      assert.equal(payload.pet.animation, command);
+      assert.equal(payload.pet.label, label);
+    }
+  } finally {
+    await close(instance.server);
+  }
+});
+
 test('unknown routes return JSON 404 without exposing stack traces', async () => {
   const instance = await startServer();
   try {
