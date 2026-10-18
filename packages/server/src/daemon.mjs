@@ -76,6 +76,25 @@ const petController = createPetController();
 let voiceConfigLoaded = null;
 let voiceConfigAt = 0;
 
+/**
+ * Test-only provider override: the official API is the default and the
+ * only supported provider. The seam is restricted to loopback so the
+ * API key can never leave the machine through it.
+ */
+function resolveVoiceApiBaseUrl(env) {
+  const value = env.SPARKIEE_VOICE_API_BASE_URL;
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')) {
+      return url.origin;
+    }
+  } catch {
+    // fall through to the official API
+  }
+  return undefined;
+}
+
 async function refreshVoiceConfig({ force = false } = {}) {
   const now = Date.now();
   if (!force && voiceConfigLoaded && now - voiceConfigAt < VOICE_CONFIG_TTL_MS) return voiceConfigLoaded;
@@ -254,7 +273,7 @@ async function main() {
   const voiceCache = createAudioCache({ dir: resolveVoiceCacheDir() });
   const voiceService = createVoiceService({
     getConfig: getVoiceConfig,
-    getClient: (config) => createElevenLabsClient({ config }),
+    getClient: (config) => createElevenLabsClient({ config, baseUrl: resolveVoiceApiBaseUrl(process.env) }),
     cache: voiceCache,
     petController,
   });
