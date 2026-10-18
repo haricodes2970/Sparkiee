@@ -29,4 +29,10 @@
 .voice-settings input[type=checkbox]{accent-color:#bea8ff}
 .voice-subheading{font-size:8.5px;letter-spacing:1.1px;font-weight:850;color:#a69bd1;border-top:1px solid #2b2c3a;padding-top:9px}
 .voice-settings .secondary-action{align-self:flex-start}
+.voice-settings select{flex:1;background:#14131d;border:1px solid #2b2c3a;color:#efeaf9;border-radius:7px;padding:6px 8px;font:inherit;font-size:11.5px;min-width:0}
+.voice-provider-row{display:flex;align-items:center;gap:7px;font-size:11.5px;color:#c8bfeb}
+.voice-provider-row .footer-dot{flex:none}
+.footer-dot.voice-provider-ready{background:#5ad19a;box-shadow:0 0 6px #5ad19a}
+.footer-dot.voice-provider-error{background:#f08080;box-shadow:0 0 6px #f08080}
+.voice-feedback{font-size:11.5px;line-height:1.5;color:#b9b1d9;min-height:14px}
 .character-picker[hidden]{display:none}

@@ -113,6 +113,7 @@
                 <select id="character-select" aria-label="Active character pack"></select>
               </label>
               <div class="voice-settings">
+                <div class="voice-subheading">CHARACTER SOUND</div>
                 <label class="movement-setting" for="audio-enabled">
                   <input type="checkbox" id="audio-enabled" checked />
                   <span>Voice reactions</span>
@@ -121,7 +122,25 @@
                   <input type="range" id="audio-volume" min="0" max="1" step="0.05" value="0.7" />
                   <output id="audio-volume-value" for="audio-volume">70%</output>
                 </label>
-                <button type="button" id="test-sound" class="secondary-action">▶ Test voice</button>
+                <button type="button" id="test-sound" class="secondary-action">▶ Test chirp</button>
+                <div class="voice-subheading">SPOKEN VOICE · ELEVENLABS</div>
+                <div class="voice-provider-row">
+                  <span id="voice-provider-dot" class="footer-dot"></span>
+                  <span id="voice-provider-text">Checking voice provider…</span>
+                </div>
+                <label class="movement-setting" for="speech-enabled">
+                  <input type="checkbox" id="speech-enabled" checked />
+                  <span>Spoken reactions</span>
+                </label>
+                <label class="movement-setting" for="speech-style">Style
+                  <select id="speech-style" aria-label="Speech style">
+                    <option value="speech">Speech only</option>
+                    <option value="both">Speech + chirps</option>
+                    <option value="chirps">Original chirps only</option>
+                  </select>
+                </label>
+                <button type="button" id="test-voice" class="secondary-action">▶ Test spoken voice</button>
+                <div id="voice-feedback" class="voice-feedback" role="status" aria-live="polite"></div>
                 <div class="voice-subheading">SUBTITLES UNDER THE PET</div>
                 <label class="movement-setting" for="captions-enabled">
                   <input type="checkbox" id="captions-enabled" checked />

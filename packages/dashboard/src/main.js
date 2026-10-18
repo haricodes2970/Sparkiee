@@ -26,6 +26,12 @@ const captionsEnabledToggle = document.querySelector('#captions-enabled');
 const captionsDurationSlider = document.querySelector('#captions-duration');
 const captionsDurationValue = document.querySelector('#captions-duration-value');
 const captionsLargeToggle = document.querySelector('#captions-large');
+const speechEnabledToggle = document.querySelector('#speech-enabled');
+const speechStyleSelect = document.querySelector('#speech-style');
+const testVoiceButton = document.querySelector('#test-voice');
+const voiceProviderDot = document.querySelector('#voice-provider-dot');
+const voiceProviderText = document.querySelector('#voice-provider-text');
+const voiceFeedback = document.querySelector('#voice-feedback');
 const characterNameEl = document.querySelector('#character-name');
 const characterMetaEl = document.querySelector('#character-meta');
 const characterPicker = document.querySelector('.character-picker');
@@ -36,6 +42,23 @@ let commandInFlight = false;
 let lastHostPhase = null;
 let settingsInFlight = false;
 let characterPacks = [];
+let voiceStatusInFlight = false;
+let voiceTestInFlight = false;
+
+const SPEECH_ERROR_TEXT = {
+  not_configured: 'No API key yet — run “sparkiee voice setup”. Original chirps are in use meanwhile.',
+  auth: 'ElevenLabs rejected the API key. Run “sparkiee voice setup” again.',
+  quota: 'The ElevenLabs account is out of credits or restricted for this voice.',
+  rate: 'ElevenLabs rate limit reached — give it a few seconds.',
+  validation: 'ElevenLabs rejected the request (voice, model, or text).',
+  timeout: 'Speech generation timed out — the provider was too slow.',
+  network: 'Could not reach ElevenLabs — check the connection.',
+  provider: 'ElevenLabs returned something unexpected.',
+};
+
+function speechErrorText(code) {
+  return SPEECH_ERROR_TEXT[code] ?? SPEECH_ERROR_TEXT.provider;
+}
 
 const HOST_PHASE_LABELS = {
   running: 'Running',
@@ -167,6 +190,11 @@ function applyPetState(state) {
     if (document.activeElement !== captionsLargeToggle) captionsLargeToggle.checked = state.settings.captions.large === true;
   }
   captionsDurationValue.textContent = `${(Number(captionsDurationSlider.value) / 1000).toFixed(1)}s`;
+  if (state.settings?.speech) {
+    if (document.activeElement !== speechEnabledToggle) speechEnabledToggle.checked = state.settings.speech.enabled !== false;
+    if (document.activeElement !== speechStyleSelect) speechStyleSelect.value = ['speech', 'chirps', 'both'].includes(state.settings.speech.style) ? state.settings.speech.style : 'speech';
+  }
+  renderSpeechStatus(state);
   document.querySelector('#preview-character').classList.remove('preview-idle', 'preview-wave', 'preview-dance', 'preview-sleep', 'preview-run', 'preview-celebrate');
   const animation = ['idle', 'wave', 'dance', 'sleep', 'run', 'celebrate'].includes(state.animation) ? state.animation : 'idle';
   document.querySelector('#preview-character').classList.add(`preview-${animation}`);
@@ -333,6 +361,102 @@ captionsLargeToggle.addEventListener('change', () => {
   const large = captionsLargeToggle.checked;
   void sendSettings({ captions: { large } }, large ? 'Larger captions enabled.' : 'Standard caption size restored.');
 });
+
+// ---------------------------------------------------------------------------
+// Spoken voice (ElevenLabs): provider status, style controls, and an honest
+// test action. This browser never sees the API key — it only reads the
+// daemon's sanitized status and asks the daemon to speak.
+// ---------------------------------------------------------------------------
+
+function renderSpeechStatus(state) {
+  if (!voiceFeedback) return;
+  const speech = state?.speech;
+  if (!speech) {
+    if (!voiceFeedback.dataset.locked) voiceFeedback.textContent = '';
+    return;
+  }
+  if (voiceFeedback.dataset.locked === 'true') return; // a test result is being shown
+  if (speech.error) {
+    voiceFeedback.textContent = `Last speech failed: ${speechErrorText(speech.error)} The caption still appeared under Sparky.`;
+  } else {
+    voiceFeedback.textContent = `Last spoken phrase: “${String(speech.text).slice(0, 80)}”`;
+  }
+}
+
+async function refreshVoiceStatus() {
+  if (voiceStatusInFlight) return;
+  voiceStatusInFlight = true;
+  try {
+    const response = await fetch('/api/v1/voice/status', { headers: { accept: 'application/json' }, cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const voice = payload.voice ?? {};
+    if (voice.configured) {
+      voiceProviderDot.classList.add('voice-provider-ready');
+      voiceProviderText.textContent = `ElevenLabs ready · ${voice.voiceId === 'k7uh1RfFIE9Dn75CNvuX' ? 'Sparky default voice' : voice.voiceId} · ${voice.modelId} · ${voice.cacheFiles ?? 0} clips cached`;
+    } else {
+      voiceProviderDot.classList.remove('voice-provider-ready');
+      voiceProviderText.textContent = 'Not configured — original chirps in use. Run “sparkiee voice setup”.';
+    }
+    if (voice.lastError) {
+      voiceProviderDot.classList.remove('voice-provider-ready');
+      voiceProviderDot.classList.add('voice-provider-error');
+      voiceProviderText.textContent += ` · ${speechErrorText(voice.lastError)}`;
+    } else {
+      voiceProviderDot.classList.remove('voice-provider-error');
+    }
+    if (Array.isArray(payload.warnings) && payload.warnings.length > 0 && !voiceFeedback.dataset.locked) {
+      voiceFeedback.textContent = payload.warnings[0];
+    }
+  } catch {
+    voiceProviderText.textContent = 'Voice status unavailable — is the runtime up?';
+  } finally {
+    voiceStatusInFlight = false;
+  }
+}
+
+speechEnabledToggle.addEventListener('change', () => {
+  const enabled = speechEnabledToggle.checked;
+  void sendSettings({ speech: { enabled } }, enabled ? 'Spoken reactions enabled.' : 'Spoken reactions disabled — chirps carry the reactions.');
+});
+speechStyleSelect.addEventListener('change', () => {
+  const style = speechStyleSelect.value;
+  void sendSettings({ speech: { style } }, `Sound style set to ${speechStyleSelect.selectedOptions[0]?.textContent || style}.`);
+});
+testVoiceButton.addEventListener('click', async () => {
+  // Debounce: one request at a time, server enforces the real rate limit.
+  if (voiceTestInFlight) return;
+  voiceTestInFlight = true;
+  testVoiceButton.disabled = true;
+  voiceFeedback.dataset.locked = 'true';
+  voiceFeedback.textContent = 'Asking ElevenLabs for a test phrase…';
+  try {
+    const response = await fetch('/api/v1/voice/test', {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: '{}',
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (response.status === 429) throw new Error(result.error || 'Too many test requests — wait a few seconds.');
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    if (result.generated) {
+      voiceFeedback.textContent = `Sparky is speaking: “${result.speech.text}” — listen on your desktop; the caption appears even when muted.`;
+    } else {
+      voiceFeedback.textContent = `Could not generate speech: ${speechErrorText(result.speech?.error)} The desktop caption still showed the phrase.`;
+    }
+  } catch (error) {
+    voiceFeedback.textContent = error.message || 'Voice test failed. Is the runtime up?';
+  } finally {
+    voiceTestInFlight = false;
+    testVoiceButton.disabled = false;
+    window.setTimeout(() => {
+      voiceFeedback.dataset.locked = 'false';
+      void refreshVoiceStatus();
+      if (lastPetState) renderSpeechStatus(lastPetState);
+    }, 6000);
+  }
+});
 characterSelect.addEventListener('change', () => {
   const characterId = characterSelect.value || null;
   void sendSettings({ characterId }, `Character pack switched to ${characterSelect.selectedOptions[0]?.textContent || characterId}.`);
@@ -378,6 +502,8 @@ retryHostButton.addEventListener('click', () => void retryHostLaunch());
 void refreshRuntime();
 void refreshPet();
 void refreshCharacter();
+void refreshVoiceStatus();
 window.setInterval(() => void refreshRuntime(), 5000);
 window.setInterval(() => void refreshPet(), 1200);
 window.setInterval(() => void refreshCharacter(), 10_000);
+window.setInterval(() => void refreshVoiceStatus(), 30_000);
