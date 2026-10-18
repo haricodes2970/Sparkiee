@@ -3,5 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Reserved for the future OpenCode observer plugin"
+  "description": "Observer-only OpenCode plugin: reports session lifecycle facts to a local Sparkiee desktop companion",
+  "license": "MIT",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "observer.mjs"
+  ],
+  "comment": "No dependencies: OpenCode provides the '@opencode/plugin' module at load time and rejects copies installed in this package's node_modules."
 }

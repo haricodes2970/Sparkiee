@@ -5,7 +5,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isAuthorized, toRuntimePayload, DEFAULT_HOST } from '../../core/src/index.mjs';
 import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayload } from '../../core/src/pet-state.mjs';
-import { COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
+import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
+import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 
 const DASHBOARD_ROOT = fileURLToPath(new URL('../../dashboard/', import.meta.url));
 const STATIC_FILES = new Map([
@@ -111,9 +112,13 @@ export function createSparkieeServer({
   voiceService = null,
   refreshVoiceConfig = async () => ({ configured: false, warnings: [] }),
   isVoiceReady = () => false,
+  agentNow = () => Date.now(),
+  agentEventDedupMs = AGENT_EVENT_DEDUP_MS,
+  agentEventCooldownMs = AGENT_EVENT_COOLDOWN_MS,
 }) {
   let shutdownRequested = false;
   const commandSpeechSpokeAt = new Map(); // voiceEvent -> timestamp
+  const agentEventSeen = new Map(); // `${sessionId}:${event}` -> timestamp
 
   /**
    * Command reactions may speak a predefined line when spoken voice is
@@ -228,6 +233,63 @@ export function createSparkieeServer({
         return;
       }
       sendJson(response, 200, { ok: true, pet: petController.triggerVoice(event) });
+      return;
+    }
+    // -------------------------------------------------------------------------
+    // Agent events: the OpenCode observer plugin reports short lifecycle facts
+    // (session id + predefined event, no content). Reactions are predefined:
+    // a pet command plus an optional spoken line. Duplicates within 2s and
+    // repeats within the cooldown are acknowledged without reacting again, so
+    // a chatty agent cannot make Sparky celebrate forever. Permission events
+    // only prompt the pet to look attentive — approvals stay with the human.
+    // -------------------------------------------------------------------------
+    if (method === 'POST' && pathname === '/api/v1/agent/event') {
+      if (!isAuthorized(request, token)) {
+        sendJson(response, 401, { error: 'Unauthorized' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!isValidAgentEventPayload(payload)) {
+        sendJson(response, 400, { error: 'Expected {source, sessionId, event} with a known agent event id.' });
+        return;
+      }
+      const key = `${payload.sessionId}:${payload.event}`;
+      const now = agentNow();
+      const lastAt = agentEventSeen.get(key);
+      if (lastAt !== undefined && now - lastAt < agentEventDedupMs) {
+        sendJson(response, 200, { ok: true, event: payload.event, deduped: true, reaction: null });
+        return;
+      }
+      agentEventSeen.set(key, now);
+      if (agentEventSeen.size > AGENT_EVENT_MEMORY_LIMIT) {
+        for (const [seenKey, seenAt] of agentEventSeen) {
+          if (now - seenAt >= agentEventCooldownMs) agentEventSeen.delete(seenKey);
+        }
+      }
+      if (lastAt !== undefined && now - lastAt < agentEventCooldownMs) {
+        sendJson(response, 200, { ok: true, event: payload.event, throttled: true, reaction: null });
+        return;
+      }
+      const reaction = AGENT_EVENT_REACTIONS[payload.event] ?? null;
+      let speech = 'skipped';
+      if (reaction?.command) petController.command(reaction.command);
+      if (reaction?.voiceEvent && voiceService && isVoiceReady()) {
+        const speechSettings = petController.snapshot()?.settings?.speech;
+        if (speechSettings && speechSettings.enabled !== false
+          && speechSettings.provider === 'elevenlabs' && speechSettings.style !== 'chirps') {
+          // Generation is asynchronous; the plugin call must not wait on
+          // the provider. Failures surface in pet state and the dashboard.
+          void voiceService.speakEvent(reaction.voiceEvent, { source: 'agent' }).catch(() => {});
+          speech = 'announced';
+        }
+      }
+      sendJson(response, 200, { ok: true, event: payload.event, reaction, speech });
       return;
     }
     // -------------------------------------------------------------------------
