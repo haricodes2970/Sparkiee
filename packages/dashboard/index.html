@@ -92,6 +92,50 @@
                   <span>Auto-roam while idle</span>
                 </label>
               </div>
+              <div class="action-heading reaction-heading"><span>REACTIONS</span><span class="action-hint">Agent-style cues</span></div>
+              <div class="emote-grid">
+                <button type="button" class="emote-button" data-pet-command="confused"><span>?</span> Confused</button>
+                <button type="button" class="emote-button" data-pet-command="thinking"><span>…</span> Thinking</button>
+                <button type="button" class="emote-button" data-pet-command="task_complete"><span>✓</span> Done</button>
+                <button type="button" class="emote-button" data-pet-command="task_error"><span>!</span> Snag</button>
+                <button type="button" class="emote-button" data-pet-command="permission_required"><span>◇</span> Ask</button>
+              </div>
+              <div class="action-heading voice-heading"><span>CHARACTER, VOICE &amp; SUBTITLES</span><span class="action-hint">Original synth voice</span></div>
+              <div class="character-card">
+                <div class="character-card-main">
+                  <strong id="character-name">sparkiee</strong>
+                  <span id="character-meta">Loading character pack…</span>
+                </div>
+                <a id="character-credits" href="https://github.com/haricodes2970/Sparkiee/blob/main/docs/ASSET_CREDITS.md" target="_blank" rel="noopener noreferrer">Credits</a>
+              </div>
+              <label class="movement-setting character-picker" for="character-select" hidden>
+                <span>Character</span>
+                <select id="character-select" aria-label="Active character pack"></select>
+              </label>
+              <div class="voice-settings">
+                <label class="movement-setting" for="audio-enabled">
+                  <input type="checkbox" id="audio-enabled" checked />
+                  <span>Voice reactions</span>
+                </label>
+                <label class="movement-setting" for="audio-volume">Volume
+                  <input type="range" id="audio-volume" min="0" max="1" step="0.05" value="0.7" />
+                  <output id="audio-volume-value" for="audio-volume">70%</output>
+                </label>
+                <button type="button" id="test-sound" class="secondary-action">▶ Test voice</button>
+                <div class="voice-subheading">SUBTITLES UNDER THE PET</div>
+                <label class="movement-setting" for="captions-enabled">
+                  <input type="checkbox" id="captions-enabled" checked />
+                  <span>Show captions (works when muted)</span>
+                </label>
+                <label class="movement-setting" for="captions-duration">Duration
+                  <input type="range" id="captions-duration" min="800" max="10000" step="200" value="2600" />
+                  <output id="captions-duration-value" for="captions-duration">2.6s</output>
+                </label>
+                <label class="movement-setting" for="captions-large">
+                  <input type="checkbox" id="captions-large" />
+                  <span>Larger caption text</span>
+                </label>
+              </div>
               <div class="pet-visibility-controls"><span id="pet-visibility-text">Pet visibility</span><div><button type="button" id="show-pet" class="secondary-action" data-pet-command="show">Summon pet</button><button type="button" id="hide-pet" class="secondary-action" data-pet-command="hide">Hide pet</button></div></div>
               <div class="command-feedback" id="command-feedback" role="status" aria-live="polite">Ready for an emote.</div>
             </div>

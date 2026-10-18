@@ -18,11 +18,24 @@ const retryHostButton = document.querySelector('#retry-host');
 const speedSlider = document.querySelector('#move-speed');
 const speedValue = document.querySelector('#move-speed-value');
 const autoRoamToggle = document.querySelector('#auto-roam');
+const audioEnabledToggle = document.querySelector('#audio-enabled');
+const audioVolumeSlider = document.querySelector('#audio-volume');
+const audioVolumeValue = document.querySelector('#audio-volume-value');
+const testSoundButton = document.querySelector('#test-sound');
+const captionsEnabledToggle = document.querySelector('#captions-enabled');
+const captionsDurationSlider = document.querySelector('#captions-duration');
+const captionsDurationValue = document.querySelector('#captions-duration-value');
+const captionsLargeToggle = document.querySelector('#captions-large');
+const characterNameEl = document.querySelector('#character-name');
+const characterMetaEl = document.querySelector('#character-meta');
+const characterPicker = document.querySelector('.character-picker');
+const characterSelect = document.querySelector('#character-select');
 const activity = [];
 let lastPetState = null;
 let commandInFlight = false;
 let lastHostPhase = null;
 let settingsInFlight = false;
+let characterPacks = [];
 
 const HOST_PHASE_LABELS = {
   running: 'Running',
@@ -143,6 +156,17 @@ function applyPetState(state) {
   if (state.settings && document.activeElement !== autoRoamToggle) {
     autoRoamToggle.checked = state.settings.autoRoam !== false;
   }
+  if (state.settings?.audio) {
+    if (document.activeElement !== audioEnabledToggle) audioEnabledToggle.checked = state.settings.audio.enabled !== false;
+    if (document.activeElement !== audioVolumeSlider) audioVolumeSlider.value = String(state.settings.audio.volume ?? 0.7);
+  }
+  audioVolumeValue.textContent = `${Math.round(Number(audioVolumeSlider.value) * 100)}%`;
+  if (state.settings?.captions) {
+    if (document.activeElement !== captionsEnabledToggle) captionsEnabledToggle.checked = state.settings.captions.enabled !== false;
+    if (document.activeElement !== captionsDurationSlider) captionsDurationSlider.value = String(state.settings.captions.durationMs ?? 2600);
+    if (document.activeElement !== captionsLargeToggle) captionsLargeToggle.checked = state.settings.captions.large === true;
+  }
+  captionsDurationValue.textContent = `${(Number(captionsDurationSlider.value) / 1000).toFixed(1)}s`;
   document.querySelector('#preview-character').classList.remove('preview-idle', 'preview-wave', 'preview-dance', 'preview-sleep', 'preview-run', 'preview-celebrate');
   const animation = ['idle', 'wave', 'dance', 'sleep', 'run', 'celebrate'].includes(state.animation) ? state.animation : 'idle';
   document.querySelector('#preview-character').classList.add(`preview-${animation}`);
@@ -216,7 +240,7 @@ async function sendSettings(partial, describe) {
   if (settingsInFlight) return;
   settingsInFlight = true;
   commandFeedback.className = 'command-feedback';
-  commandFeedback.textContent = 'Saving movement settings…';
+  commandFeedback.textContent = 'Saving pet settings…';
   try {
     const response = await fetch('/api/v1/pet/settings', {
       method: 'PUT',
@@ -229,7 +253,7 @@ async function sendSettings(partial, describe) {
     applyPetState(result.pet);
     commandFeedback.className = 'command-feedback success';
     commandFeedback.textContent = describe;
-    recordActivity('settings', 'Movement settings updated', describe);
+    recordActivity('settings', 'Pet settings updated', describe);
   } catch (error) {
     commandFeedback.className = 'command-feedback error';
     commandFeedback.textContent = error.message || 'Could not save movement settings.';
@@ -239,6 +263,8 @@ async function sendSettings(partial, describe) {
 }
 
 let speedDebounce;
+let volumeDebounce;
+let captionDurationDebounce;
 speedSlider.addEventListener('input', () => { speedValue.textContent = `${speedSlider.value}×`; });
 speedSlider.addEventListener('change', () => {
   window.clearTimeout(speedDebounce);
@@ -252,6 +278,98 @@ autoRoamToggle.addEventListener('change', () => {
   void sendSettings({ autoRoam: enabled }, enabled ? 'Auto-roam enabled.' : 'Auto-roam disabled.');
 });
 
+audioEnabledToggle.addEventListener('change', () => {
+  const enabled = audioEnabledToggle.checked;
+  void sendSettings({ audio: { enabled } }, enabled ? 'Voice reactions enabled.' : 'Voice reactions muted (captions keep working).');
+});
+audioVolumeSlider.addEventListener('input', () => {
+  audioVolumeValue.textContent = `${Math.round(Number(audioVolumeSlider.value) * 100)}%`;
+});
+audioVolumeSlider.addEventListener('change', () => {
+  window.clearTimeout(volumeDebounce);
+  volumeDebounce = window.setTimeout(() => {
+    const volume = Number(audioVolumeSlider.value);
+    void sendSettings({ audio: { volume } }, `Voice volume set to ${Math.round(volume * 100)}%.`);
+  }, 250);
+});
+testSoundButton.addEventListener('click', async () => {
+  testSoundButton.disabled = true;
+  try {
+    const response = await fetch('/api/v1/pet/test-sound', {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'greet' }),
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    applyPetState(result.pet);
+    commandFeedback.className = 'command-feedback success';
+    commandFeedback.textContent = audioEnabledToggle.checked
+      ? 'Sparkiee said hello — listen for the chirp and watch the caption.'
+      : 'Voice is muted, so only the caption appeared. That is the design.';
+  } catch (error) {
+    commandFeedback.className = 'command-feedback error';
+    commandFeedback.textContent = error.message || 'Could not play the test sound.';
+  } finally {
+    testSoundButton.disabled = false;
+  }
+});
+captionsEnabledToggle.addEventListener('change', () => {
+  const enabled = captionsEnabledToggle.checked;
+  void sendSettings({ captions: { enabled } }, enabled ? 'Captions enabled.' : 'Captions disabled.');
+});
+captionsDurationSlider.addEventListener('input', () => {
+  captionsDurationValue.textContent = `${(Number(captionsDurationSlider.value) / 1000).toFixed(1)}s`;
+});
+captionsDurationSlider.addEventListener('change', () => {
+  window.clearTimeout(captionDurationDebounce);
+  captionDurationDebounce = window.setTimeout(() => {
+    const durationMs = Number(captionsDurationSlider.value);
+    void sendSettings({ captions: { durationMs } }, `Caption duration set to ${(durationMs / 1000).toFixed(1)}s.`);
+  }, 250);
+});
+captionsLargeToggle.addEventListener('change', () => {
+  const large = captionsLargeToggle.checked;
+  void sendSettings({ captions: { large } }, large ? 'Larger captions enabled.' : 'Standard caption size restored.');
+});
+characterSelect.addEventListener('change', () => {
+  const characterId = characterSelect.value || null;
+  void sendSettings({ characterId }, `Character pack switched to ${characterSelect.selectedOptions[0]?.textContent || characterId}.`);
+});
+
+async function refreshCharacter() {
+  try {
+    const response = await fetch('/api/v1/characters', { cache: 'no-store' });
+    if (!response.ok) throw new Error('Character list unavailable');
+    const data = await response.json();
+    characterPacks = Array.isArray(data.packs) ? data.packs : [];
+    const activeId = lastPetState?.settings?.characterId;
+    const active = characterPacks.find((pack) => pack.id === activeId) ?? characterPacks[0];
+    if (active) {
+      characterNameEl.textContent = String(active.name || active.id).toLowerCase();
+      const license = active.license?.type ? ` · ${active.license.type}` : '';
+      characterMetaEl.textContent = `v${active.version || '1.0.0'}${license} · ${active.animationCount || 13} animations · ${active.voiceStyle === 'clips' ? 'clip voice' : 'synthesized voice'}`;
+    } else {
+      characterNameEl.textContent = 'no character';
+      characterMetaEl.textContent = 'No valid character pack found — check docs/ASSET_CREDITS.md.';
+    }
+    // Only show the picker when the user actually has more than one pack.
+    characterPicker.hidden = characterPacks.length < 2;
+    characterSelect.replaceChildren();
+    for (const pack of characterPacks) {
+      const option = document.createElement('option');
+      option.value = pack.id;
+      option.textContent = pack.name || pack.id;
+      option.selected = pack.id === (activeId ?? characterPacks[0]?.id);
+      characterSelect.append(option);
+    }
+  } catch {
+    characterNameEl.textContent = 'sparkiee';
+    characterMetaEl.textContent = 'Character info unavailable — is the runtime up?';
+  }
+}
+
 for (const button of commandButtons) {
   button.addEventListener('click', () => void sendPetCommand(button.dataset.petCommand));
 }
@@ -259,5 +377,7 @@ retryHostButton.addEventListener('click', () => void retryHostLaunch());
 
 void refreshRuntime();
 void refreshPet();
+void refreshCharacter();
 window.setInterval(() => void refreshRuntime(), 5000);
 window.setInterval(() => void refreshPet(), 1200);
+window.setInterval(() => void refreshCharacter(), 10_000);
