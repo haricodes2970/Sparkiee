@@ -91,9 +91,13 @@ export function createPetController({ clock = () => Date.now() } = {}) {
     autoRoam: true,
     audio: { enabled: true, volume: 0.7 },
     captions: { enabled: true, durationMs: 2600, large: false },
+    speech: { enabled: true, provider: 'elevenlabs', style: 'speech' },
     characterId: null,
   };
   let voice = null;
+  let speech = null;
+  let speechSequence = 0;
+  let speechReady = false;
   let lastHeartbeat = 0;
 
   function invalid(message) {
@@ -107,19 +111,52 @@ export function createPetController({ clock = () => Date.now() } = {}) {
       return {
         ...state,
         voice: voice ? { ...voice } : null,
+        speech: speech ? { ...speech } : null,
+        speechReady,
         settings: {
           ...settings,
           audio: { ...settings.audio },
           captions: { ...settings.captions },
+          speech: { ...settings.speech },
         },
         hostConnected: lastHeartbeat > 0 && clock() - lastHeartbeat < 3500,
       };
+    },
+    /**
+     * Publish a speech announcement for the pet host to deliver: either a
+     * cached clip to play (clipId) or an honest failure (error) so the
+     * renderer shows the caption and falls back to chirps.
+     */
+    announceSpeech({ text, clipId = null, error = null, voiceEvent = null, source = 'api' } = {}) {
+      const value = typeof text === 'string' ? text.trim().slice(0, 220) : '';
+      if (value.length === 0) {
+        const failure = new Error('speech text must be a non-empty string');
+        failure.code = 'INVALID_SPEECH';
+        throw failure;
+      }
+      speechSequence += 1;
+      speech = {
+        id: speechSequence,
+        text: value,
+        clipId: typeof clipId === 'string' ? clipId : null,
+        error: typeof error === 'string' ? error : null,
+        voiceEvent: typeof voiceEvent === 'string' ? voiceEvent : null,
+        source: typeof source === 'string' ? source : 'api',
+        at: new Date(clock()).toISOString(),
+      };
+      return this.snapshot();
+    },
+    /** Whether a configured speech provider is available (set by daemon). */
+    setVoiceCapability(ready) {
+      speechReady = ready === true;
+      return this.snapshot();
     },
     updateSettings(partial) {
       const next = {
         ...settings,
         audio: { ...settings.audio },
         captions: { ...settings.captions },
+        speech: { ...settings.speech },
       };
       if ('moveSpeed' in partial) {
         const speed = Number(partial.moveSpeed);
@@ -163,6 +200,23 @@ export function createPetController({ clock = () => Date.now() } = {}) {
         }
         if ('enabled' in captions) next.captions.enabled = captions.enabled;
         if ('large' in captions) next.captions.large = captions.large;
+      }
+      if ('speech' in partial) {
+        const speechSettings = partial.speech;
+        if (!speechSettings || typeof speechSettings !== 'object' || Array.isArray(speechSettings)) throw invalid('speech must be an object.');
+        for (const key of Object.keys(speechSettings)) {
+          if (!['enabled', 'provider', 'style'].includes(key)) throw invalid(`speech.${key} is not a supported speech setting.`);
+        }
+        if ('enabled' in speechSettings && typeof speechSettings.enabled !== 'boolean') throw invalid('speech.enabled must be a boolean.');
+        if ('provider' in speechSettings && !['elevenlabs', 'chirps'].includes(speechSettings.provider)) {
+          throw invalid('speech.provider must be "elevenlabs" or "chirps".');
+        }
+        if ('style' in speechSettings && !['speech', 'chirps', 'both'].includes(speechSettings.style)) {
+          throw invalid('speech.style must be "speech", "chirps", or "both".');
+        }
+        if ('enabled' in speechSettings) next.speech.enabled = speechSettings.enabled;
+        if ('provider' in speechSettings) next.speech.provider = speechSettings.provider;
+        if ('style' in speechSettings) next.speech.style = speechSettings.style;
       }
       if ('characterId' in partial) {
         const id = partial.characterId;
@@ -222,7 +276,7 @@ export function isValidPetCommandPayload(payload) {
   );
 }
 
-const SETTINGS_TOP_LEVEL_KEYS = ['moveSpeed', 'autoRoam', 'audio', 'captions', 'characterId'];
+const SETTINGS_TOP_LEVEL_KEYS = ['moveSpeed', 'autoRoam', 'audio', 'captions', 'speech', 'characterId'];
 
 function isValidAudioSettings(audio) {
   if (!audio || typeof audio !== 'object' || Array.isArray(audio)) return false;
@@ -249,6 +303,16 @@ function isValidCaptionSettings(captions) {
   return true;
 }
 
+function isValidSpeechSettings(speech) {
+  if (!speech || typeof speech !== 'object' || Array.isArray(speech)) return false;
+  const keys = Object.keys(speech);
+  if (keys.length === 0 || keys.some((key) => !['enabled', 'provider', 'style'].includes(key))) return false;
+  if ('enabled' in speech && typeof speech.enabled !== 'boolean') return false;
+  if ('provider' in speech && !['elevenlabs', 'chirps'].includes(speech.provider)) return false;
+  if ('style' in speech && !['speech', 'chirps', 'both'].includes(speech.style)) return false;
+  return true;
+}
+
 export function isValidPetSettingsPayload(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
   const keys = Object.keys(payload);
@@ -260,6 +324,7 @@ export function isValidPetSettingsPayload(payload) {
   if ('autoRoam' in payload && typeof payload.autoRoam !== 'boolean') return false;
   if ('audio' in payload && !isValidAudioSettings(payload.audio)) return false;
   if ('captions' in payload && !isValidCaptionSettings(payload.captions)) return false;
+  if ('speech' in payload && !isValidSpeechSettings(payload.speech)) return false;
   if ('characterId' in payload) {
     const id = payload.characterId;
     if (id !== null && (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{1,63}$/.test(id))) return false;
