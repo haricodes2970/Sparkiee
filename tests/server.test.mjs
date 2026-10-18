@@ -339,3 +339,97 @@ test('unknown routes return JSON 404 without exposing stack traces', async () =>
     await close(instance.server);
   }
 });
+
+async function postJson(url, body, headers = {}) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  });
+  return { status: response.status, payload: await response.json() };
+}
+
+test('presentation ownership is readable publicly but claims need token or same origin', async () => {
+  const instance = await startServer();
+  try {
+    const read = await fetch(`http://127.0.0.1:${instance.port}/api/v1/presentation`);
+    assert.equal(read.status, 200);
+    const before = await read.json();
+    assert.equal(before.presentation.mode, 'desktop');
+    assert.equal(before.presentation.owner, null);
+
+    const denied = await postJson(
+      `http://127.0.0.1:${instance.port}/api/v1/presentation/claim`,
+      { owner: 'tab-one-1234' },
+      { origin: 'https://attacker.example' },
+    );
+    assert.equal(denied.status, 403);
+
+    const sameOrigin = await postJson(
+      `http://127.0.0.1:${instance.port}/api/v1/presentation/claim`,
+      { owner: 'tab-one-1234' },
+      { origin: `http://127.0.0.1:${instance.port}` },
+    );
+    assert.equal(sameOrigin.status, 200);
+    assert.equal(sameOrigin.payload.presentation.mode, 'dashboard');
+    assert.equal(sameOrigin.payload.presentation.owner, 'tab-one-1234');
+    assert.equal(sameOrigin.payload.pet.visible, true);
+
+    const invalid = await postJson(
+      `http://127.0.0.1:${instance.port}/api/v1/presentation/claim`,
+      { owner: 'x' },
+      { authorization: `Bearer ${'c'.repeat(64)}` },
+    );
+    assert.equal(invalid.status, 400);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('a second tab gets 409 while the first owns presentation, release restores desktop', async () => {
+  const instance = await startServer();
+  try {
+    const auth = { authorization: `Bearer ${'c'.repeat(64)}` };
+    const first = await postJson(`http://127.0.0.1:${instance.port}/api/v1/presentation/claim`, { owner: 'tab-one-1234' }, auth);
+    assert.equal(first.status, 200);
+
+    const second = await postJson(`http://127.0.0.1:${instance.port}/api/v1/presentation/claim`, { owner: 'tab-two-5678' }, auth);
+    assert.equal(second.status, 409);
+    assert.equal(second.payload.presentation.owner, 'tab-one-1234');
+    assert.equal(second.payload.error, 'Another dashboard session currently owns Sparky.');
+
+    const wrongRelease = await postJson(`http://127.0.0.1:${instance.port}/api/v1/presentation/release`, { owner: 'tab-two-5678' }, auth);
+    assert.equal(wrongRelease.status, 409);
+
+    const release = await postJson(`http://127.0.0.1:${instance.port}/api/v1/presentation/release`, { owner: 'tab-one-1234' }, auth);
+    assert.equal(release.status, 200);
+    assert.equal(release.payload.presentation.mode, 'desktop');
+    assert.equal(release.payload.presentation.owner, null);
+  } finally {
+    await close(instance.server);
+  }
+});
+
+test('desktop handoff endpoints require authorization and swap presentation atomically', async () => {
+  const instance = await startServer();
+  try {
+    const denied = await postJson(`http://127.0.0.1:${instance.port}/api/v1/presentation/to-dashboard`, {});
+    assert.equal(denied.status, 403);
+
+    const auth = { authorization: `Bearer ${'c'.repeat(64)}` };
+    const away = await postJson(`http://127.0.0.1:${instance.port}/api/v1/presentation/to-dashboard`, {}, auth);
+    assert.equal(away.status, 200);
+    assert.equal(away.payload.presentation.mode, 'dashboard');
+    assert.equal(away.payload.presentation.pending, true);
+    assert.equal(away.payload.presentation.owner, null);
+    assert.equal(away.payload.pet.visible, true);
+
+    const back = await postJson(`http://127.0.0.1:${instance.port}/api/v1/presentation/to-desktop`, {}, auth);
+    assert.equal(back.status, 200);
+    assert.equal(back.payload.presentation.mode, 'desktop');
+    assert.equal(back.payload.presentation.owner, null);
+    assert.equal(back.payload.pet.visible, true);
+  } finally {
+    await close(instance.server);
+  }
+});

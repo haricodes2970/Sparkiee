@@ -134,6 +134,9 @@ contextBridge.exposeInMainWorld('sparkieePet', Object.freeze({
     }
     return ipcRenderer.invoke('pet:command', command);
   },
+  async sendToDashboard() {
+    return ipcRenderer.invoke('pet:send-to-dashboard');
+  },
   startDrag(point) {
     if (isPointerPoint(point)) ipcRenderer.send('pet:drag-start', point);
   },

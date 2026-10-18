@@ -323,6 +323,21 @@ async function main() {
   await writeFile(paths.pidFile, `${process.pid}\n`, { mode: 0o600 });
   await log(`Sparkiee ready at http://${host}:${port} (pid ${process.pid}).`);
   launchPetHost(token);
+  // Presentation lease ticker: an abandoned or unclaimed dashboard claim
+  // expires here (bounded lease), restoring desktop presentation without
+  // relying on browser unload events.
+  const presentationTicker = setInterval(() => {
+    try {
+      const hostRunning = hostTracker.snapshot().phase === 'running';
+      const restored = petController.tickPresentation({ hostRunning });
+      if (restored?.presentation?.lastTransition) {
+        void log(`Presentation restored to desktop (${restored.presentation.lastTransition.reason}).`);
+      }
+    } catch (error) {
+      void log(`Presentation ticker error: ${error.message}`);
+    }
+  }, 2_000);
+  presentationTicker.unref();
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('uncaughtException', async (error) => {

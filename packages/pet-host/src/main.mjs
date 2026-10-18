@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createMovementController } from './movement.mjs';
 import { listCharacterPacks } from '../../core/src/character-pack.mjs';
-import { COMMAND_VOICE_EVENTS } from '../../core/src/pet-state.mjs';
+import { COMMAND_VOICE_EVENTS, desktopWindowVisible } from '../../core/src/pet-state.mjs';
 
 const APP_DIR = fileURLToPath(new URL('../', import.meta.url));
 const PET_PAGE = path.join(APP_DIR, 'renderer', 'index.html');
@@ -31,6 +31,9 @@ let currentPack = null;
 let loadedPackId = null;
 let sentSpeechId = 0;
 let deliveringSpeech = false;
+let runtimeReachable = true;
+let closeTransferPendingUntil = 0;
+let quitting = false;
 const hostStartedAt = Date.now();
 
 if (process.platform === 'linux' && process.env.SPARKIEE_OZONE_PLATFORM !== 'wayland') {
@@ -61,8 +64,10 @@ async function requestApi(route, options = {}) {
 }
 
 function reactToMovement(state) {
-  if (!movement) return;
-  if (!state || state.visible === false) {
+  if (!movement || !petWindow || petWindow.isDestroyed()) return;
+  // Roaming follows the visible desktop surface only: hidden pets and
+  // dashboard-owned pets keep the native window (and its movement) still.
+  if (!state || !desktopWindowVisible(state)) {
     movement.stop();
     return;
   }
@@ -155,13 +160,31 @@ function publishState(state) {
     lastState = serialised;
     if (petWindow && !petWindow.isDestroyed()) {
       petWindow.webContents.send('pet:state', state);
-      if (state.visible && !petWindow.isVisible()) petWindow.showInactive();
-      if (!state.visible && petWindow.isVisible()) petWindow.hide();
     }
     reactToMovement(state);
     void reloadPackForState(state);
     void deliverPendingSpeech();
   }
+  reconcileWindowVisibility(state);
+}
+
+/**
+ * The native window follows presentation ownership plus the visible flag:
+ * hidden while a dashboard owns the pet, and recreated after an ordinary
+ * window close once presentation returns to the desktop. Checked on every
+ * poll (not only on state changes) so close/restore races self-heal.
+ */
+function reconcileWindowVisibility(state) {
+  const shouldShow = desktopWindowVisible(state);
+  if (!petWindow || petWindow.isDestroyed()) {
+    // A close-initiated transfer is in flight: do not flash the window back
+    // before the daemon confirms where presentation now lives.
+    const transferInFlight = Date.now() < closeTransferPendingUntil && runtimeReachable;
+    if (shouldShow && !transferInFlight) petWindow = createPetWindow();
+    return;
+  }
+  if (shouldShow && !petWindow.isVisible()) petWindow.showInactive();
+  if (!shouldShow && petWindow.isVisible()) petWindow.hide();
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +254,9 @@ async function deliverPendingSpeech() {
 async function pollState() {
   try {
     publishState(await requestApi('/api/v1/pet/state'));
+    runtimeReachable = true;
   } catch {
+    runtimeReachable = false;
     publishState({
       ...(latestState || {}),
       animation: 'surprised',
@@ -298,10 +323,25 @@ function createPetWindow() {
   });
   pet.setMenu(null);
   pet.setAlwaysOnTop(true);
-  pet.on('ready-to-show', () => pet.showInactive());
+  pet.on('ready-to-show', () => {
+    // First paint can land after the first polls: only show immediately if
+    // the desktop surface owns presentation (otherwise the reconcile pass
+    // keeps the just-created window unmapped until it does).
+    if (desktopWindowVisible(latestState)) pet.showInactive();
+  });
   pet.on('closed', () => {
     petWindow = undefined;
-    app.quit();
+    // An ordinary window close (Alt+F4 on the frameless window) is a
+    // transfer request, not an app exit: ask for dashboard presentation.
+    // If no dashboard tab claims the transfer within the grace period the
+    // daemon restores desktop mode and the window is recreated on the next
+    // poll — the host process never dies, so the daemon never enters a
+    // restart loop for a deliberate close. Graceful app shutdowns skip the
+    // transfer so restarting the host never parks presentation in limbo.
+    if (!quitting) {
+      closeTransferPendingUntil = Date.now() + 5_000;
+      void requestApi('/api/v1/presentation/to-dashboard', { method: 'POST' }).catch(() => {});
+    }
   });
   pet.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith('file://')) event.preventDefault();
@@ -316,6 +356,11 @@ function createPetWindow() {
 ipcMain.handle('pet:command', async (_event, command) => sendCommand(command));
 ipcMain.handle('pet:get-state', () => latestState);
 ipcMain.handle('pet:get-pack', () => currentPack);
+ipcMain.handle('pet:send-to-dashboard', async () => {
+  const payload = await requestApi('/api/v1/presentation/to-dashboard', { method: 'POST' });
+  if (payload?.pet) publishState(payload.pet);
+  return payload?.pet ?? null;
+});
 ipcMain.on('pet:drag-start', (event, point) => {
   if (!isPointerPoint(point) || !petWindow || event.sender !== petWindow.webContents) return;
   const [windowX, windowY] = petWindow.getPosition();
@@ -342,27 +387,43 @@ app.whenReady().then(async () => {
   await reloadPackForState(null).catch(() => {});
   petWindow = createPetWindow();
   movement = createMovementController({
-    getBounds: () => petWindow.getBounds(),
-    getWorkArea: () => screen.getDisplayMatching(petWindow.getBounds()).workArea,
-    setPosition: (x, y) => petWindow.setPosition(Math.round(x), Math.round(y), false),
+    getBounds: () => (petWindow && !petWindow.isDestroyed()
+      ? petWindow.getBounds()
+      : { x: 0, y: 0, width: 0, height: 0 }),
+    getWorkArea: () => (petWindow && !petWindow.isDestroyed()
+      ? screen.getDisplayMatching(petWindow.getBounds()).workArea
+      : screen.getPrimaryDisplay().workArea),
+    setPosition: (x, y) => {
+      if (petWindow && !petWindow.isDestroyed()) petWindow.setPosition(Math.round(x), Math.round(y), false);
+    },
     speedScale: () => latestState?.settings?.moveSpeed ?? 1,
   });
   await pollState();
   pollTimer = setInterval(() => void pollState(), POLL_MS);
   app.on('activate', () => {
-    if (petWindow && !petWindow.isDestroyed()) petWindow.showInactive();
+    if (desktopWindowVisible(latestState) && (!petWindow || petWindow.isDestroyed())) {
+      petWindow = createPetWindow();
+    } else if (petWindow && !petWindow.isDestroyed()) {
+      petWindow.showInactive();
+    }
   });
 }).catch(() => app.quit());
 
 app.on('before-quit', () => {
+  quitting = true;
   if (pollTimer) clearInterval(pollTimer);
   movement?.stop();
   ipcMain.removeHandler('pet:command');
   ipcMain.removeHandler('pet:get-state');
   ipcMain.removeHandler('pet:get-pack');
+  ipcMain.removeHandler('pet:send-to-dashboard');
   ipcMain.removeAllListeners('pet:drag-start');
   ipcMain.removeAllListeners('pet:drag-move');
   ipcMain.removeAllListeners('pet:drag-end');
 });
 
-app.on('window-all-closed', () => app.quit());
+// Deliberate or WM-initiated window closure must not kill the host process:
+// an exiting host would bounce through the daemon's restart loop. The host
+// stays alive headless and the reconcile pass recreates the window when
+// presentation returns to the desktop.
+app.on('window-all-closed', () => {});

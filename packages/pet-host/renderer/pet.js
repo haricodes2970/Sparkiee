@@ -315,6 +315,23 @@ petButton.addEventListener('click', () => {
   void command('wave');
 });
 
+// Unobtrusive hover control: transfer presentation to the dashboard. The
+// window hides the moment the daemon records ownership transfer, so the
+// button only exists while the desktop surface is live.
+const sendDashboardButton = document.querySelector('#send-dashboard');
+sendDashboardButton.addEventListener('click', async (event) => {
+  event.stopPropagation();
+  sendDashboardButton.disabled = true;
+  errorText.textContent = '';
+  try {
+    await window.sparkieePet.sendToDashboard();
+  } catch {
+    errorText.textContent = 'Could not hand off to the dashboard.';
+    errorText.hidden = false;
+    sendDashboardButton.disabled = false;
+  }
+});
+
 window.sparkieePet.onState(applyState);
 window.sparkieePet.getState().then(applyState).catch(() => {});
 window.sparkieePet.onSpeech((speech) => {

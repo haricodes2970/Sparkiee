@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isAuthorized, toRuntimePayload, DEFAULT_HOST } from '../../core/src/index.mjs';
-import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayload } from '../../core/src/pet-state.mjs';
+import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayload, isValidPresentationClaimPayload, isValidPresentationReleasePayload } from '../../core/src/pet-state.mjs';
 import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 
@@ -96,6 +96,12 @@ async function serveStatic(response, route) {
     sendJson(response, 500, { error: 'Dashboard asset unavailable' });
   }
   return true;
+}
+
+function presentationErrorStatus(error) {
+  if (error?.code === 'PRESENTATION_OWNED') return 409;
+  if (typeof error?.code === 'string' && error.code.startsWith('INVALID_')) return 400;
+  return 500;
 }
 
 /** Create the loopback-only Sparkiee HTTP API and dashboard server. */
@@ -233,6 +239,88 @@ export function createSparkieeServer({
         return;
       }
       sendJson(response, 200, { ok: true, pet: petController.triggerVoice(event) });
+      return;
+    }
+    // -------------------------------------------------------------------------
+    // Presentation ownership: exactly one live surface shows the pet.
+    // Dashboard tabs claim/renew a bounded lease (same-origin or token); the
+    // desktop host transfers out with the token; the daemon ticker expires
+    // dead leases so a closed browser tab restores desktop presentation.
+    // -------------------------------------------------------------------------
+    if (method === 'GET' && pathname === '/api/v1/presentation') {
+      sendJson(response, 200, { presentation: petController.snapshot().presentation });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/presentation/claim') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!isValidPresentationClaimPayload(payload)) {
+        sendJson(response, 400, { error: 'Expected {owner, ttlMs?} with an 8-64 character session id.' });
+        return;
+      }
+      try {
+        const snapshot = petController.claimPresentation(payload);
+        sendJson(response, 200, { ok: true, presentation: snapshot.presentation, pet: snapshot });
+      } catch (error) {
+        sendJson(response, presentationErrorStatus(error), {
+          error: error.message,
+          presentation: petController.snapshot().presentation,
+        });
+      }
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/presentation/release') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!isValidPresentationReleasePayload(payload)) {
+        sendJson(response, 400, { error: 'Expected {owner?} with a valid session id.' });
+        return;
+      }
+      try {
+        const snapshot = petController.releasePresentation({ owner: payload.owner ?? null, reason: 'released' });
+        sendJson(response, 200, { ok: true, presentation: snapshot.presentation, pet: snapshot });
+      } catch (error) {
+        sendJson(response, presentationErrorStatus(error), {
+          error: error.message,
+          presentation: petController.snapshot().presentation,
+        });
+      }
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/presentation/to-dashboard') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      const snapshot = petController.transferToDashboard({ reason: 'sent' });
+      sendJson(response, 200, { ok: true, presentation: snapshot.presentation, pet: snapshot });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/presentation/to-desktop') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      const snapshot = petController.transferToDesktop({ reason: 'requested' });
+      sendJson(response, 200, { ok: true, presentation: snapshot.presentation, pet: snapshot });
       return;
     }
     // -------------------------------------------------------------------------

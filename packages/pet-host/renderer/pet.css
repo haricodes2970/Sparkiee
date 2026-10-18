@@ -134,6 +134,36 @@ html, body {
 }
 .pet-error[hidden] { display: none; }
 
+/* Hover-revealed "send to dashboard" control: invisible until the pointer
+   nears the pet, so the transparent window never reads like a normal app
+   chrome. Keyboard focus reveals it too. */
+.send-dashboard {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 233, 138, 0.35);
+  border-radius: 6px;
+  background: rgba(24, 20, 34, 0.82);
+  color: #ffe98a;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  pointer-events: none;
+}
+#pet-root:hover .send-dashboard,
+.send-dashboard:focus-visible {
+  opacity: 0.92;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.send-dashboard:hover { background: rgba(48, 40, 24, 0.95); }
+.send-dashboard:disabled { opacity: 0.5; cursor: progress; }
+
 /* Small voice-test button, deliberately tiny so it never dominates the
    pet or blocks the sprite drag area. */
 .voice-test {

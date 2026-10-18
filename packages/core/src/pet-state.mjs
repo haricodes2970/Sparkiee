@@ -55,6 +55,36 @@ const MESSAGES = Object.freeze({
 export const MOVE_SPEED_MIN = 0.25;
 export const MOVE_SPEED_MAX = 3;
 
+// ---------------------------------------------------------------------------
+// Presentation ownership: exactly one surface shows the live pet at a time.
+// The desktop host shows the native window while mode is "desktop"; a
+// dashboard tab must actively claim (and renew) a bounded lease to own the
+// pet in "dashboard" mode. A dead tab's lease expires and presentation
+// restores to the desktop — no reliance on unload events.
+// ---------------------------------------------------------------------------
+
+export const PRESENTATION_MODES = Object.freeze(['desktop', 'dashboard']);
+export const PRESENTATION_LEASE_MIN_MS = 5_000;
+export const PRESENTATION_LEASE_MAX_MS = 300_000;
+export const PRESENTATION_LEASE_DEFAULT_MS = 15_000;
+/** Grace period for a dashboard claim after an explicit send/hide transfer. */
+export const PRESENTATION_CLAIM_GRACE_MS = 12_000;
+const OWNER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{7,63}$/;
+
+/**
+ * Whether the native desktop window should be visible for a pet snapshot.
+ * Window visibility and presentation ownership stay separate from the
+ * user-facing `visible` flag: a dashboard-mode pet never shows the native
+ * window, so two live surfaces can never render at once.
+ *
+ * @param {object|null} state Pet snapshot.
+ * @returns {boolean}
+ */
+export function desktopWindowVisible(state) {
+  if (!state || typeof state !== 'object') return false;
+  return state.visible !== false && state.presentation?.mode !== 'dashboard';
+}
+
 /**
  * Engine-level mapping from pet commands to character-pack voice events.
  * Packs declare the actual sounds/captions; the engine decides which event
@@ -85,6 +115,14 @@ export function createPetController({ clock = () => Date.now() } = {}) {
     label: LABELS.idle,
     message: MESSAGES.idle,
     updatedAt: new Date(clock()).toISOString(),
+    presentation: {
+      mode: 'desktop',
+      owner: null,
+      leaseExpiresAt: null,
+      pending: false,
+      lastTransition: null,
+      error: null,
+    },
   };
   let settings = {
     moveSpeed: 1,
@@ -149,6 +187,149 @@ export function createPetController({ clock = () => Date.now() } = {}) {
     /** Whether a configured speech provider is available (set by daemon). */
     setVoiceCapability(ready) {
       speechReady = ready === true;
+      return this.snapshot();
+    },
+    /**
+     * A dashboard tab claims (or renews its claim on) presentation
+     * ownership. Renewals only extend the lease; a different tab cannot
+     * steal an unexpired claim, but can take over once the old lease dies.
+     */
+    claimPresentation({ owner, ttlMs = PRESENTATION_LEASE_DEFAULT_MS } = {}) {
+      if (typeof owner !== 'string' || !OWNER_PATTERN.test(owner)) {
+        const error = new Error('owner must be a dashboard session id of 8-64 letters, digits, or dashes.');
+        error.code = 'INVALID_PRESENTATION_OWNER';
+        throw error;
+      }
+      const ttl = Number(ttlMs);
+      if (!Number.isInteger(ttl) || ttl < PRESENTATION_LEASE_MIN_MS || ttl > PRESENTATION_LEASE_MAX_MS) {
+        const error = new Error(`ttlMs must be an integer from ${PRESENTATION_LEASE_MIN_MS} to ${PRESENTATION_LEASE_MAX_MS}.`);
+        error.code = 'INVALID_PRESENTATION_TTL';
+        throw error;
+      }
+      const now = clock();
+      const current = state.presentation;
+      const leaseExpiresAt = new Date(now + ttl).toISOString();
+      if (current.mode === 'desktop') {
+        state = {
+          ...state,
+          presentation: {
+            mode: 'dashboard',
+            owner,
+            leaseExpiresAt,
+            pending: false,
+            lastTransition: { from: 'desktop', to: 'dashboard', owner, at: new Date(now).toISOString(), reason: 'claimed' },
+            error: null,
+          },
+        };
+        return this.snapshot();
+      }
+      const leaseValid = current.leaseExpiresAt !== null && Date.parse(current.leaseExpiresAt) > now;
+      if (current.owner !== null && current.owner !== owner && leaseValid) {
+        const error = new Error('Another dashboard session currently owns Sparky.');
+        error.code = 'PRESENTATION_OWNED';
+        error.presentation = { ...current };
+        throw error;
+      }
+      const ownerChanged = current.owner !== owner;
+      state = {
+        ...state,
+        presentation: {
+          mode: 'dashboard',
+          owner,
+          leaseExpiresAt,
+          pending: false,
+          lastTransition: ownerChanged
+            ? { from: 'dashboard', to: 'dashboard', owner, at: new Date(now).toISOString(), reason: 'claimed' }
+            : current.lastTransition,
+          error: null,
+        },
+      };
+      return this.snapshot();
+    },
+    /**
+     * End a dashboard claim and hand presentation back to the desktop.
+     * An owner id may only release its own claim; omitting the owner forces
+     * the restore (used by explicit "bring to desktop" requests).
+     */
+    releasePresentation({ owner = null, reason = 'released' } = {}) {
+      const current = state.presentation;
+      if (owner !== null && current.owner !== null && owner !== current.owner) {
+        const error = new Error('Another dashboard session currently owns Sparky.');
+        error.code = 'PRESENTATION_OWNED';
+        error.presentation = { ...current };
+        throw error;
+      }
+      if (current.mode === 'desktop' && current.owner === null && !current.pending) return this.snapshot();
+      const now = clock();
+      state = {
+        ...state,
+        presentation: {
+          mode: 'desktop',
+          owner: null,
+          leaseExpiresAt: null,
+          pending: false,
+          lastTransition: { from: current.mode, to: 'desktop', owner: null, at: new Date(now).toISOString(), reason },
+          error: null,
+        },
+      };
+      return this.snapshot();
+    },
+    /**
+     * The desktop host asks for dashboard presentation (send button, window
+     * close, or hide). Ownership is not granted here: the transfer stays
+     * `pending` until a dashboard tab claims it within the grace period,
+     * otherwise presentation restores to the desktop on the next tick.
+     */
+    transferToDashboard({ reason = 'sent', graceMs = PRESENTATION_CLAIM_GRACE_MS } = {}) {
+      const current = state.presentation;
+      const now = clock();
+      const leaseValid = current.leaseExpiresAt !== null && Date.parse(current.leaseExpiresAt) > now;
+      // An active dashboard owner is never kicked out by a stale host request.
+      if (current.mode === 'dashboard' && current.owner !== null && leaseValid) return this.snapshot();
+      const grace = Number.isInteger(graceMs) && graceMs >= 1_000 && graceMs <= PRESENTATION_LEASE_MAX_MS
+        ? graceMs
+        : PRESENTATION_CLAIM_GRACE_MS;
+      state = {
+        ...state,
+        presentation: {
+          mode: 'dashboard',
+          owner: null,
+          leaseExpiresAt: new Date(now + grace).toISOString(),
+          pending: true,
+          lastTransition: { from: current.mode, to: 'dashboard', owner: null, at: new Date(now).toISOString(), reason },
+          error: null,
+        },
+      };
+      return this.snapshot();
+    },
+    /** Explicit return to desktop presentation (dashboard button, CLI). */
+    transferToDesktop({ reason = 'returned' } = {}) {
+      return this.releasePresentation({ owner: null, reason });
+    },
+    /**
+     * Daemon lease ticker: expires an unclaimed or abandoned dashboard
+     * claim and restores desktop presentation. Returns the new snapshot
+     * when a transition happened, otherwise null.
+     */
+    tickPresentation({ hostRunning = true } = {}) {
+      const current = state.presentation;
+      if (current.mode !== 'dashboard') return null;
+      const now = clock();
+      if (current.leaseExpiresAt === null || Date.parse(current.leaseExpiresAt) > now) return null;
+      const reason = current.owner === null ? 'unclaimed' : 'lease_expired';
+      state = {
+        ...state,
+        presentation: {
+          mode: 'desktop',
+          owner: null,
+          leaseExpiresAt: null,
+          pending: false,
+          lastTransition: { from: 'dashboard', to: 'desktop', owner: null, at: new Date(now).toISOString(), reason },
+          error: hostRunning
+            ? null
+            : 'Desktop pet host is not running; Sparky will reappear when it recovers.',
+        },
+      };
       return this.snapshot();
     },
     updateSettings(partial) {
@@ -260,6 +441,35 @@ export function createPetController({ clock = () => Date.now() } = {}) {
         message: MESSAGES[command],
         updatedAt: new Date(now).toISOString(),
       };
+      // Hiding the pet hands presentation to the dashboard (claimed within
+      // the grace period, or it quietly returns to desktop mode while the
+      // pet stays hidden). Summoning while a dashboard holds no claim undoes
+      // that transfer; summoning while a dashboard is live only un-hides.
+      if (command === 'hide' && state.presentation.mode === 'desktop') {
+        state = {
+          ...state,
+          presentation: {
+            mode: 'dashboard',
+            owner: null,
+            leaseExpiresAt: new Date(now + PRESENTATION_CLAIM_GRACE_MS).toISOString(),
+            pending: true,
+            lastTransition: { from: 'desktop', to: 'dashboard', owner: null, at: new Date(now).toISOString(), reason: 'hidden' },
+            error: null,
+          },
+        };
+      } else if (command === 'show' && state.presentation.mode === 'dashboard' && state.presentation.owner === null) {
+        state = {
+          ...state,
+          presentation: {
+            mode: 'desktop',
+            owner: null,
+            leaseExpiresAt: null,
+            pending: false,
+            lastTransition: { from: 'dashboard', to: 'desktop', owner: null, at: new Date(now).toISOString(), reason: 'shown' },
+            error: null,
+          },
+        };
+      }
       return this.snapshot();
     },
   };
@@ -274,6 +484,28 @@ export function isValidPetCommandPayload(payload) {
     typeof payload.command === 'string' &&
     PET_COMMANDS.includes(payload.command)
   );
+}
+
+export function isValidPresentationClaimPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const keys = Object.keys(payload);
+  if (keys.length === 0 || keys.some((key) => !['owner', 'ttlMs'].includes(key))) return false;
+  if (typeof payload.owner !== 'string' || !OWNER_PATTERN.test(payload.owner)) return false;
+  if ('ttlMs' in payload) {
+    const ttl = payload.ttlMs;
+    if (!Number.isInteger(ttl) || ttl < PRESENTATION_LEASE_MIN_MS || ttl > PRESENTATION_LEASE_MAX_MS) return false;
+  }
+  return true;
+}
+
+export function isValidPresentationReleasePayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const keys = Object.keys(payload);
+  if (keys.length > 1) return false;
+  if ('owner' in payload && payload.owner !== null) {
+    if (typeof payload.owner !== 'string' || !OWNER_PATTERN.test(payload.owner)) return false;
+  }
+  return true;
 }
 
 const SETTINGS_TOP_LEVEL_KEYS = ['moveSpeed', 'autoRoam', 'audio', 'captions', 'speech', 'characterId'];
