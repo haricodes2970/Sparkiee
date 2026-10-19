@@ -1,4 +1,5 @@
 import { createFramePlayer } from '/src/lib/frame-player.mjs';
+import { assistantPanelViewModel } from '/src/lib/assistant-panel.mjs';
 
 const connectionPill = document.querySelector('#connection-pill');
 const connectionText = document.querySelector('#connection-text');
@@ -762,6 +763,139 @@ async function refreshVoiceStatus() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Assistant panel: honest voice-assistant status and one live surface of
+// controls. The view-model keeps every label truthful — needs-setup rows say
+// so, unregistered hotkeys say why, and unknown states show the raw word
+// instead of a friendly lie.
+// ---------------------------------------------------------------------------
+
+let assistantInFlight = false;
+let assistantTestMicInFlight = false;
+
+function applyAssistantState(vm) {
+  if (!vm || typeof vm !== 'object') return;
+  const busy = vm.busy === true;
+  const failed = vm.state === 'error' || vm.lastError !== '';
+  assistantDot.classList.toggle('voice-provider-ready', busy);
+  assistantDot.classList.toggle('voice-provider-error', failed);
+  assistantStateText.textContent = vm.stateLabel;
+  assistantHotkeyText.textContent = `Hotkey — ${vm.hotkeyLabel}`;
+  assistantWakeSttText.textContent = `Wake word: ${vm.wakeLabel} · Speech recognition: ${vm.sttLabel}`;
+  assistantMicText.textContent = `Microphone — ${vm.micLabel}`;
+  if (vm.transcript) {
+    assistantTranscriptText.textContent = `Heard: ${vm.transcript}`;
+  } else {
+    assistantTranscriptText.textContent = '';
+  }
+  const lastAction = vm.lastError
+    ? `Error: ${vm.lastError}`
+    : (vm.lastActionLabel || 'No assistant actions yet this session.');
+  assistantLastActionText.textContent = lastAction;
+  assistantPttButton.disabled = !vm.startEnabled && !busy;
+  assistantCancelButton.disabled = vm.cancelEnabled !== true;
+  const stopLabel = vm.state === 'listening' || busy ? 'Stop listening' : 'Hold a voice command';
+  assistantPttButton.lastChild.textContent = stopLabel;
+  assistantLastTranscript = vm.transcript || assistantLastTranscript;
+}
+
+async function refreshAssistant() {
+  if (assistantInFlight) return;
+  assistantInFlight = true;
+  try {
+    const response = await fetch('/api/v1/assistant/status', { headers: { accept: 'application/json' }, cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    const assistant = payload.assistant ?? payload ?? {};
+    // The daemon nests STT inside the assistant snapshot; the view-model
+    // takes it at the top level — lift it instead of pretending "unknown".
+    applyAssistantState(assistantPanelViewModel({ assistant, stt: assistant.stt ?? null }));
+  } catch {
+    assistantDot.classList.remove('voice-provider-ready');
+    assistantDot.classList.add('voice-provider-error');
+    assistantStateText.textContent = 'Status unavailable';
+    assistantHotkeyText.textContent = 'Hotkey — unknown';
+    assistantWakeSttText.textContent = 'Wake word: unknown · Speech recognition: unknown';
+    assistantMicText.textContent = 'Microphone — unknown';
+    assistantLastActionText.textContent = 'Assistant status unavailable — is the runtime up?';
+    assistantLastTranscript = '';
+  } finally {
+    assistantInFlight = false;
+  }
+}
+
+async function sendAssistantToggle() {
+  if (assistantPttButton.disabled) return;
+  assistantPttButton.disabled = true;
+  assistantStateText.textContent = assistantLastTranscript ? 'Working it out…' : 'Starting mic…';
+  try {
+    const response = await fetch('/api/v1/assistant/ptt/toggle', {
+      method: 'POST',
+      headers: { accept: 'application/json' },
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    const assistant = result.assistant ?? {};
+    applyAssistantState(assistantPanelViewModel({ assistant, stt: assistant.stt ?? null }));
+  } catch (error) {
+    assistantMicResult.textContent = `Could not toggle the microphone: ${error.message}`;
+    void refreshAssistant();
+  }
+}
+
+async function sendAssistantCancel() {
+  if (assistantCancelButton.disabled) return;
+  assistantCancelButton.disabled = true;
+  try {
+    const response = await fetch('/api/v1/assistant/ptt/cancel', {
+      method: 'POST',
+      headers: { accept: 'application/json' },
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    assistantMicResult.textContent = 'Capture cancelled — the utterance was discarded, nothing was sent.';
+  } catch (error) {
+    assistantMicResult.textContent = `Could not cancel capture: ${error.message}`;
+  } finally {
+    void refreshAssistant();
+  }
+}
+
+async function sendAssistantTestMic() {
+  if (assistantTestMicInFlight) return;
+  assistantTestMicInFlight = true;
+  assistantTestMicButton.disabled = true;
+  assistantMicResult.textContent = 'Testing the microphone for ~3 seconds…';
+  try {
+    const response = await fetch('/api/v1/assistant/mic/diagnose', {
+      method: 'POST',
+      headers: { accept: 'application/json' },
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    const mic = result.mic ?? {};
+    assistantMicResult.textContent = mic.detail
+      ? String(mic.detail).slice(0, 200)
+      : (mic.ok === true ? 'Microphone is working.' : 'Microphone test did not confirm capture.');
+  } catch (error) {
+    assistantMicResult.textContent = `Microphone test failed: ${error.message}`;
+  } finally {
+    window.setTimeout(() => {
+      assistantTestMicInFlight = false;
+      assistantTestMicButton.disabled = false;
+    }, 2000);
+    void refreshAssistant();
+  }
+}
+
+assistantPttButton.addEventListener('click', () => { void sendAssistantToggle(); });
+assistantCancelButton.addEventListener('click', () => { void sendAssistantCancel(); });
+assistantTestMicButton.addEventListener('click', () => { void sendAssistantTestMic(); });
+
+
 speechEnabledToggle.addEventListener('change', () => {
   const enabled = speechEnabledToggle.checked;
   void sendSettings({ speech: { enabled } }, enabled ? 'Spoken reactions enabled.' : 'Spoken reactions disabled — chirps carry the reactions.');
@@ -947,7 +1081,9 @@ void refreshRuntime();
 void refreshPet();
 void refreshCharacter();
 void refreshVoiceStatus();
+void refreshAssistant();
 window.setInterval(() => void refreshRuntime(), 5000);
 window.setInterval(() => void refreshPet(), 1200);
 window.setInterval(() => void refreshCharacter(), 10_000);
 window.setInterval(() => void refreshVoiceStatus(), 30_000);
+window.setInterval(() => void refreshAssistant(), 1500);
