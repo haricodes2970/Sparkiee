@@ -27,6 +27,7 @@ import {
   writeVoiceConfig,
 } from '../../core/src/voice-config.mjs';
 import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
+import { setupSttEnvironment, MAX_SETUP_TIMEOUT_MS } from '../../core/src/stt-setup.mjs';
 import { createGnomeHotkeyInstaller } from '../../core/src/gnome-hotkey.mjs';
 import { describeSpeechError } from '../../server/src/voice-service.mjs';
 
@@ -75,6 +76,7 @@ Commands:
   stop         Stop the local runtime
   status       Show whether the local runtime is running
   ptt toggle   Start or stop a push-to-talk recording (used by the OS keybinding)
+  assistant setup  One-time local speech-recognition setup (venv + tiny.en model)
   assistant hotkey install|status|remove
                Manage the GNOME media-keys fallback binding for the mic shortcut
   voice status Show whether Sparky's spoken voice is configured
@@ -562,11 +564,42 @@ async function assistantHotkey(env, subcommand, args) {
 }
 
 async function runAssistantCommand(subcommand, args, env) {
-  // `sparkiee assistant hotkey <verb> [args...]`
-  if (subcommand !== 'hotkey') {
-    throw new Error('Unknown assistant command. Try: assistant hotkey install | status | remove.');
+  switch (subcommand) {
+    case 'setup':
+      await assistantSetup(env, args);
+      return;
+    case 'hotkey':
+      await assistantHotkey(env, args[0] ?? 'status', args.slice(1));
+      return;
+    default:
+      throw new Error('Unknown assistant command. Try: assistant setup | assistant hotkey status.');
   }
-  await assistantHotkey(env, args[0] ?? 'status', args.slice(1));
+}
+
+/**
+ * One-time local speech-recognition setup (explicit, idempotent, honest):
+ * venv + faster-whisper + tiny.en model. Long-running by nature; every
+ * progress step is echoed. Secrets are never involved — this step talks
+ * to PyPI and the Hugging Face model repository only.
+ */
+async function assistantSetup(env, args) {
+  let timeoutMs = 20 * 60 * 1000;
+  const index = args.indexOf('--timeout-ms');
+  if (index !== -1) {
+    const raw = args[index + 1];
+    if (!raw) throw new Error('--timeout-ms requires a value.');
+    timeoutMs = Number(raw);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 5_000 || timeoutMs > MAX_SETUP_TIMEOUT_MS) {
+      throw new Error(`Invalid --timeout-ms "${raw}". Expected an integer from 5000 to ${MAX_SETUP_TIMEOUT_MS}.`);
+    }
+  } else if (args.length > 0) {
+    throw new Error('Unknown arguments. Usage: sparkiee assistant setup [--timeout-ms <ms>].');
+  }
+  const result = await setupSttEnvironment({ env, onLine: (line) => process.stdout.write(`${line}\n`), timeoutMs });
+  if (!result.ok) {
+    throw new Error(`Speech recognition setup did not finish: ${result.detail}`);
+  }
+  process.stdout.write('Try it: focus any app, press Ctrl+Alt+Space, and say "Play Madira".\n');
 }
 
 async function runVoiceCommand(subcommand, args, env) {
