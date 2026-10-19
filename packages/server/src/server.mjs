@@ -10,6 +10,7 @@ import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayloa
 import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 import { parseMusicIntent, runMusicCommand } from '../../core/src/music-commands.mjs';
+import { createGnomeHotkeyInstaller } from '../../core/src/gnome-hotkey.mjs';
 import { createSttService, probeSttSetup } from '../../core/src/stt-service.mjs';
 import { hotkeyAction } from '../../core/src/voice-hotkey.mjs';
 import { createAssistantService } from './assistant-service.mjs';
@@ -152,6 +153,7 @@ export function createSparkieeServer({
   hotkey = null,
   sttStatus = null,
   onWindowEvent = null, // ({event, pid}) => void — diagnostics sink
+  gnomeKeybindingProbe = null, // testable override of the live gsettings probe
 }) {
   let shutdownRequested = false;
   const commandSpeechSpokeAt = new Map(); // voiceEvent -> timestamp
@@ -187,6 +189,37 @@ export function createSparkieeServer({
     const speech = petController.snapshot()?.settings?.speech;
     return Boolean(speech) && speech.enabled !== false
       && speech.provider === 'elevenlabs' && speech.style !== 'chirps';
+  }
+
+  /**
+   * GNOME media-keys binding state, cached briefly: gsettings is a subprocess
+   * call, and the shortcut endpoint is polled. `managedBy: 'gnome'` tells the
+   * pet host to leave the Electron grab off so one physical press can never
+   * arrive twice.
+   */
+  let gnomeKeybinding = null;
+  let gnomeKeybindingAt = 0;
+  async function gnomeKeybindingInfo() {
+    if (gnomeKeybinding && Date.now() - gnomeKeybindingAt < 5000) return gnomeKeybinding;
+    if (gnomeKeybindingProbe) {
+      gnomeKeybinding = await gnomeKeybindingProbe();
+      gnomeKeybinding = { managedBy: gnomeKeybinding.installed === true ? 'gnome' : 'app', ...gnomeKeybinding };
+    } else {
+      try {
+        const installer = await createGnomeHotkeyInstaller();
+        const status = await installer.status();
+        gnomeKeybinding = {
+          managedBy: status.installed ? 'gnome' : 'app',
+          installed: status.installed === true,
+          binding: status.binding ?? null,
+          error: status.error ?? null,
+        };
+      } catch (error) {
+        gnomeKeybinding = { managedBy: 'app', installed: false, binding: null, error: String(error?.message ?? error).slice(0, 120) };
+      }
+    }
+    gnomeKeybindingAt = Date.now();
+    return gnomeKeybinding;
   }
 
   /** Within the rolling TTS budget for user-triggered assistant replies? */
@@ -869,13 +902,17 @@ export function createSparkieeServer({
           snap.mic.devices = [];
         }
       }
+      const gnome = await gnomeKeybindingInfo();
       sendJson(response, 200, {
         ok: true,
         assistant: {
           ...snap,
-          shortcut: hotkey
-            ? hotkey.snapshot().shortcut
-            : { enabled: true, accelerator: 'Control+Alt+Space', registered: null, registrationDetail: null },
+          shortcut: {
+            ...(hotkey
+              ? hotkey.snapshot().shortcut
+              : { enabled: true, accelerator: 'Control+Alt+Space', registered: null, registrationDetail: null }),
+            keybinding: gnome,
+          },
         },
       });
       return;
@@ -1027,7 +1064,13 @@ export function createSparkieeServer({
       const shortcut = hotkey
         ? hotkey.snapshot().shortcut
         : { enabled: true, accelerator: 'Control+Alt+Space', registered: null, registrationDetail: null };
-      sendJson(response, 200, { ok: true, shortcut });
+      // Who owns delivering the physical press? When the GNOME media-keys
+      // fallback is installed it fires everywhere and the Electron grab also
+      // still wins on X11-focused apps — one press must NOT arrive twice
+      // (reproduced bug: second delivery stopped capture ~0.5 s in). The
+      // pet host reads this and stays unregistered while GNOME manages it.
+      const gnome = await gnomeKeybindingInfo();
+      sendJson(response, 200, { ok: true, shortcut: { ...shortcut, keybinding: gnome } });
       return;
     }
     if (method === 'PUT' && pathname === '/api/v1/assistant/shortcut') {

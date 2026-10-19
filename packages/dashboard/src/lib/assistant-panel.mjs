@@ -36,7 +36,7 @@ function describeHotkey(shortcut) {
   if (shortcut.registered === true) return `On — registered (${combo})`;
   if (shortcut.registered === false) {
     const reason = String(shortcut.registrationDetail ?? 'not active').slice(0, 80);
-    return `On but not active: ${reason}`;
+    return `On — ${reason}`;
   }
   return `Pending registration (${combo})`;
 }

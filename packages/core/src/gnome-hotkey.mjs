@@ -71,12 +71,14 @@ export async function createGnomeHotkeyInstaller({
 
   async function ourEntry() {
     const keys = { name: null, binding: null, command: null };
+    let readError = null;
     for (const key of Object.keys(keys)) {
       try {
         const raw = await run(gsettings, ['get', SCHEMA_PATH, key]);
         keys[key] = typeof raw === 'string' ? raw.trim().replace(/^'/, '').replace(/'$/, '') : null;
-      } catch {
+      } catch (error) {
         keys[key] = null;
+        readError = error?.message ?? String(error);
       }
     }
     const registered = keys.name === 'Sparkiee' && Boolean(keys.command);
@@ -85,6 +87,7 @@ export async function createGnomeHotkeyInstaller({
       ...keys,
       binding: keys.binding, // stored value is already GNOME notation
       path: OUR_REL_PATH,
+      error: readError,
     };
   }
 
@@ -100,6 +103,7 @@ export async function createGnomeHotkeyInstaller({
         binding: entry.binding,
         command: entry.command,
         path: OUR_REL_PATH,
+        error: entry.error ?? (paths.length === 0 ? 'listPaths returned an empty binding list' : null),
       };
     },
 

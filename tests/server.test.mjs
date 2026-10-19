@@ -1159,6 +1159,29 @@ test('assistant status includes shortcut block', async () => {
   } finally { await close(instance.server); }
 });
 
+test('shortcut state names the press owner so one press cannot arrive twice', async () => {
+  const gnomeProbe = async () => ({ managedBy: 'gnome', installed: true, binding: '<Control><Alt>space', error: null });
+  const instance = await startServer({ hotkey: hotkeyHubStub(), gnomeKeybindingProbe: gnomeProbe });
+  try {
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/shortcut`);
+    const body = await res.json();
+    assert.equal(body.shortcut.keybinding.managedBy, 'gnome');
+    assert.equal(body.shortcut.keybinding.installed, true);
+
+    const status = await (await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/status`)).json();
+    assert.equal(status.assistant.shortcut.keybinding.managedBy, 'gnome');
+  } finally { await close(instance.server); }
+});
+
+test('live gsettings probe never throws into an unmanaged default', async () => {
+  const instance = await startServer({ hotkey: hotkeyHubStub() });
+  try {
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/shortcut`);
+    const body = await res.json();
+    assert.ok(body.shortcut.keybinding && typeof body.shortcut.keybinding.managedBy === 'string');
+  } finally { await close(instance.server); }
+});
+
 // ---------------------------------------------------------------------------
 // STT readiness rides on /assistant/status (no paths, no venv internals).
 // ---------------------------------------------------------------------------

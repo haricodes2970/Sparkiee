@@ -25,6 +25,7 @@ const PACK_ROOTS = [
 ];
 let petWindow;
 let pollTimer;
+let hotkeySyncTimer;
 let lastState = '';
 let latestState = null;
 let dragOrigin = null;
@@ -413,6 +414,21 @@ async function syncShortcutFromSettings() {
   if (!settings) return;
   const enabled = settings.enabled === true;
   const accelerator = settings.accelerator || 'Control+Alt+Space';
+  // Press-ownership arbitration: when the GNOME media-keys binding is
+  // installed it delivers every press globally AND the X11 grab can still
+  // deliver the same press to us — one press must never start and stop
+  // capture in the same second (reproduced). While GNOME owns delivery the
+  // Electron grab stays off; the CLI binding is the single honest source.
+  const gnomeManaged = settings.keybinding?.managedBy === 'gnome';
+  if (gnomeManaged) {
+    if (hotkey.isActive()) {
+      hotkey.update({ enabled: false, accelerator });
+    }
+    // Report even when the grab was never registered, so the dashboard and
+    // daemon stop seeing "pending" and see the real delivery owner instead.
+    await reportShortcutRegistration({ registered: false, detail: 'Delivered by the GNOME media-keys binding (sparkiee ptt toggle).' });
+    return;
+  }
   const already = hotkey.isActive() ? 'registered' : 'not';
   const changed = (enabled && already !== 'registered')
     || (!enabled && already === 'registered');
@@ -613,6 +629,7 @@ app.whenReady().then(async () => {
   });
   await pollState();
   pollTimer = setInterval(() => void pollState(), POLL_MS);
+  hotkeySyncTimer = setInterval(() => void syncShortcutFromSettings(), 6000);
   app.on('activate', () => {
     if (desktopWindowVisible(latestState) && (!petWindow || petWindow.isDestroyed())) {
       petWindow = createPetWindow();
@@ -622,20 +639,21 @@ app.whenReady().then(async () => {
   });
 }).catch(() => app.quit());
 
-app.on('before-quit', () => {
-  quitting = true;
-  if (pollTimer) clearInterval(pollTimer);
-  movement?.stop();
-  hotkey.dispose();
-  ipcMain.removeHandler('pet:command');
-  ipcMain.removeHandler('pet:get-state');
-  ipcMain.removeHandler('pet:get-pack');
-  ipcMain.removeHandler('pet:send-to-dashboard');
-  ipcMain.removeAllListeners('pet:drag-start');
-  ipcMain.removeAllListeners('pet:drag-move');
-  ipcMain.removeAllListeners('pet:drag-end');
-  ipcMain.removeHandler('pet:cancel-utterance');
-});
+  app.on('before-quit', () => {
+    quitting = true;
+    if (pollTimer) clearInterval(pollTimer);
+    if (hotkeySyncTimer) clearInterval(hotkeySyncTimer);
+    movement?.stop();
+    hotkey.dispose();
+    ipcMain.removeHandler('pet:command');
+    ipcMain.removeHandler('pet:get-state');
+    ipcMain.removeHandler('pet:get-pack');
+    ipcMain.removeHandler('pet:send-to-dashboard');
+    ipcMain.removeAllListeners('pet:drag-start');
+    ipcMain.removeAllListeners('pet:drag-move');
+    ipcMain.removeAllListeners('pet:drag-end');
+    ipcMain.removeHandler('pet:cancel-utterance');
+  });
 
 // Deliberate or WM-initiated window closure must not kill the host process:
 // an exiting host would bounce through the daemon's restart loop. The host
