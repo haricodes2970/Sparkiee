@@ -12,6 +12,7 @@ export const ASSISTANT_STATES = Object.freeze([
   'armed',
   'wake_detected',
   'listening',
+  'hearing',
   'transcribing',
   'interpreting',
   'executing',
@@ -24,7 +25,8 @@ const ALLOWED_TRANSITIONS = Object.freeze({
   disabled: ['armed', 'listening', 'error'],
   armed: ['disabled', 'wake_detected', 'listening', 'error'],
   wake_detected: ['listening', 'armed', 'disabled', 'error'],
-  listening: ['transcribing', 'armed', 'disabled', 'error'],
+  listening: ['hearing', 'transcribing', 'armed', 'disabled', 'error'],
+  hearing: ['transcribing', 'armed', 'disabled', 'error'],
   transcribing: ['interpreting', 'armed', 'disabled', 'error'],
   interpreting: ['executing', 'awaiting_confirmation', 'speaking', 'armed', 'disabled', 'error'],
   executing: ['speaking', 'armed', 'disabled', 'error'],
@@ -52,6 +54,7 @@ export function createAssistantController({ now = () => Date.now() } = {}) {
   let state = 'disabled';
   let since = now();
   let micActive = false;
+  let hearLevel = 0; // smoothed 0..1 mic level while capture is live
   let lastAction = null;
   let lastError = null;
   const history = []; // most-recent-last, capped
@@ -61,8 +64,9 @@ export function createAssistantController({ now = () => Date.now() } = {}) {
       state,
       since: new Date(since).toISOString(),
       micActive,
-      listening: state === 'armed' || state === 'wake_detected' || state === 'listening',
-      cancellable: state === 'listening' || state === 'transcribing' || state === 'wake_detected',
+      hearLevel,
+      listening: state === 'armed' || state === 'wake_detected' || state === 'listening' || state === 'hearing',
+      cancellable: state === 'listening' || state === 'hearing' || state === 'transcribing' || state === 'wake_detected',
       lastAction: lastAction ? { ...lastAction } : null,
       lastError,
       history: history.map((entry) => ({ ...entry })),
@@ -71,6 +75,13 @@ export function createAssistantController({ now = () => Date.now() } = {}) {
 
   return {
     snapshot,
+    /** Smoothed mic level (0..1); only meaningful while a session is live. */
+    setHearLevel(value) {
+      const next = Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+      hearLevel = (hearLevel * 0.7) + (next * 0.3); // EMA: settles naturally
+      return hearLevel;
+    },
+    hearLevel: () => hearLevel,
     transition(to, { reason = null, error = null } = {}) {
       if (!isValidAssistantState(to)) {
         throw stateError('INVALID_ASSISTANT_STATE', `Unknown assistant state: ${String(to)}.`);
@@ -91,6 +102,7 @@ export function createAssistantController({ now = () => Date.now() } = {}) {
     },
     setMicActive(active, { reason = null } = {}) {
       micActive = Boolean(active);
+      if (!micActive) hearLevel = 0;
       if (reason) {
         history.push({ at: new Date(now()).toISOString(), from: state, to: state, reason });
         while (history.length > 10) history.shift();

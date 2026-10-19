@@ -45,6 +45,45 @@ export function createAssistantService({
     const n = Math.floor(chunk.length / 2);
     return n > 0 ? Math.round(Math.sqrt(sum / n)) : 0;
   }
+
+  /**
+   * Adaptive speech threshold: the calibrated noise floor with hysteresis
+   * so fans and room hum never count as voice, but a quiet mic still trips
+   * on real speech. Never entirely off; the fallback is the legacy value.
+   */
+  function speechThresholdFor(utterance) {
+    const floor = Number(utterance?.noiseFloor) || 0;
+    const adaptive = floor > 0 ? Math.min(floor * 4, 2500) : 0;
+    return Math.max(speechRmsThreshold, adaptive);
+  }
+
+  /**
+   * Honest no-speech reply: a manual stop before speech reads differently
+   * from a timeout so the user knows which case happened.
+   */
+  function speechSeenReply(utterance, diagnostics) {
+    const heardNothingNoise = (diagnostics?.noiseFloor ?? 0) > 0 && utterance?.speechSeen !== true;
+    if (heardNothingNoise) {
+      return `I captured the microphone but heard only ambient sound — nothing I could recognise. The mic is live; press again and speak a little louder.`;
+    }
+    return "I didn't hear anything I could recognise.";
+  }
+
+  /** Structured, non-sensitive capture diagnostics for the action ledger. */
+  function utteranceDiagnostics(utterance, event, summary = null) {    const lastVoice = utterance?.lastVoiceAt ?? null;
+    const firstPcm = utterance?.firstPcmAt ?? null;
+    return {
+      event,
+      speechSeen: utterance?.speechSeen === true,
+      voicedChunks: utterance?.voicedSampleCount ?? 0,
+      noiseFloor: utterance?.noiseFloor ?? 0,
+      speechThreshold: speechThresholdFor(utterance ?? {}),
+      firstPcmDelayMs: firstPcm && utterance?.startedAt ? Math.max(0, firstPcm - utterance.startedAt) : null,
+      voiceCoverageMs: lastVoice && firstPcm && lastVoice > firstPcm ? Math.max(0, lastVoice - firstPcm) : null,
+      silenceAfterVoiceMs: lastVoice ? Math.max(0, now() - lastVoice) : null,
+      bytes: summary?.bytes ?? (utterance?.buffer ? utterance.buffer.reduce((total, chunk) => total + chunk.length, 0) : 0),
+    };
+  }
   function stopWatchdog() {
     if (capture?.watchdogId !== undefined && capture?.watchdogId !== null) {
       try { clearIntervalImpl(capture.watchdogId); } catch { /* already gone */ }
@@ -138,56 +177,129 @@ export function createAssistantService({
     });
   }
 
-  async function startPtt({ silenceMs = 1200, durationMs = 15000 } = {}) {
+  async function startPtt({ silenceMs = 1600, durationMs = 15_000, calibrationMs = 400 } = {}) {
     if (mic.active()) {
       throw Object.assign(new Error('MIC_BUSY'), { code: 'MIC_BUSY' });
     }
     armedBeforePtt = controller.snapshot().state === 'armed';
-    const utterance = { buffer: [], speechSeen: false, lastLoudAt: now(), silenceMs, settled: false, result: null, watchdogId: null };
+    const utterance = {
+      buffer: [],
+      startedAt: now(),         // when the session request began (pre-first-PCM)
+      speechSeen: false,        // sustained voice detected (2+ loud chunks)
+      voicedStreak: 0,
+      noiseFloor: 0,            // calibrated from the first ~calibrationMs
+      floorSamples: [],
+      voicedSampleCount: 0,
+      silenceMs,
+      lastVoiceAt: null,        // last chunk above the adaptive threshold
+      firstPcmAt: null,         // actual first PCM delivery
+      durationMs,
+      settled: false,
+      result: null,
+      watchdogId: null,
+    };
     capture = utterance;
+    let hearUpdatedAt = 0;
+    const HEAR_MIN_INTERVAL_MS = 60; // level stream stays ~16 Hz, cheap
     const { id, done } = await mic.start({
       durationMs,
       label: 'ptt',
       onAudio: (chunk) => {
         if (!capture || capture !== utterance) return;
+        if (utterance.firstPcmAt === null) {
+          utterance.firstPcmAt = now();
+          // The session is genuinely live only once real PCM arrives.
+          try { controller.transition('hearing', { reason: `first-pcm:${Math.round(utterance.durationMs / 100) / 10}s cap` }); } catch { /* already there */ }
+        }
         utterance.buffer.push(chunk);
-        if (rmsOf(chunk) > speechRmsThreshold) {
-          utterance.speechSeen = true;
-          utterance.lastLoudAt = now();
+
+        // Calibration: an adaptive floor from the opening window means the
+        // hum of a fan never reads as voice, and a quiet mic never misses it.
+        const chunkRms = rmsOf(chunk);
+        if (now() - utterance.firstPcmAt < calibrationMs) {
+          utterance.floorSamples.push(chunkRms);
+          if (utterance.floorSamples.length >= 4) {
+            // Median-ish average of the opening window, robust to a single pop.
+            const sorted = [...utterance.floorSamples].sort((a, b) => a - b);
+            const mid = Math.floor(sorted.length / 2);
+            utterance.noiseFloor = Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+          }
+          return;
+        }
+        const threshold = speechThresholdFor(utterance);
+        if (chunkRms >= threshold) {
+          utterance.voicedStreak += 1;
+          if (utterance.voicedStreak === 2 && !utterance.speechSeen) {
+            utterance.speechSeen = true;
+            utterance.voicedSampleCount = utterance.voicedStreak;
+            controller.recordAction({
+              kind: 'ptt-diagnostic',
+              event: 'voice-detected',
+              bytes: utterance.buffer.reduce((a, b) => a + b.length, 0),
+              threshold,
+              note: 'sustained voice observed over the calibrated floor',
+            });
+          } else if (utterance.voicedStreak > 2) {
+            utterance.voicedSampleCount += 1;
+          }
+          utterance.lastVoiceAt = now();
+        } else {
+          utterance.voicedStreak = 0;
+        }
+        // Renderer metric stream: 0..1, smoothed, relative to the floor.
+        // ~1500 RMS above the floor is animated full-scale; normal speech
+        // lands clearly visible, ambient hum near zero.
+        if (now() - hearUpdatedAt >= HEAR_MIN_INTERVAL_MS) {
+          hearUpdatedAt = now();
+          const span = Math.max(1500, threshold * 2);
+          controller.setHearLevel(Math.min(1, Math.max(0, (chunkRms - utterance.noiseFloor) / span)));
         }
       },
     });
     // Silence watchdog: speech followed by sustained silence auto-submits.
     utterance.watchdogId = setIntervalImpl(() => {
       if (!capture || capture !== utterance || utterance.settled) return;
-      if (!utterance.speechSeen) return;
-      if (now() - utterance.lastLoudAt < utterance.silenceMs) return;
-      if (!mic.active() || controller.snapshot().state !== 'listening') return;
+      if (!utterance.speechSeen) return; // never submit an empty/silent capture
+      if (!utterance.lastVoiceAt || now() - utterance.lastVoiceAt < utterance.silenceMs) return;
+      if (!mic.active() || !['listening', 'hearing'].includes(controller.snapshot().state)) return;
       utterance.settled = true;
       stopWatchdog();
-      submitCapturedUtterance(utterance, 'ptt-silence-submit').catch(() => {});
+      submitCapturedUtterance(utterance, 'ptt-silence-submit', null, {
+        diagnostics: utteranceDiagnostics(utterance, 'silence-after-speech'),
+      }).catch(() => {});
     }, 250);
-    // Natural expiry (max-duration) without a manual stop must still move
-    // state honestly back to armed/disabled — a stuck "listening" is a lie.
+    // Natural expiry (max-duration): speech observed means the recording is
+    // still valid — submit it instead of throwing real words away; without
+    // speech, report an honest timeout so the user knows the mic heard only
+    // quiet.
     done.then((summary) => {
       const snap = controller.snapshot();
-      if (snap.state !== 'listening' || utterance.settled) return;
+      if (['listening', 'hearing'].includes(snap.state) === false || utterance.settled) return;
       utterance.settled = true;
       if (capture === utterance) { stopWatchdog(); capture = null; }
+      controller.setMicActive(false, { reason: 'ptt-max-duration' });
+      const diagnostics = utteranceDiagnostics(utterance, summary?.bytes > 0 ? 'max-duration' : 'max-duration-without-audio');
+      // Only speech-bearing recordings are worth transcribing at expiry;
+      // ambient-only audio gets an honest timeout instead of a fake STT run.
+      if (utterance.speechSeen && utterance.buffer.length > 0 && (stt || executor?.transcribe)) {
+        const payload = { ...utterance, settled: true, capture: null };
+        submitCapturedUtterance(payload, 'ptt-max-duration', summary, { diagnostics }).catch(() => {});
+        return;
+      }
       const target = (listeningEnabled && armedBeforePtt) ? 'armed' : 'disabled';
       try {
         controller.transition(target, { reason: 'ptt-max-duration' });
       } catch {
         try { controller.transition('disabled', { reason: 'ptt-max-duration' }); } catch {}
       }
-      controller.setMicActive(false, { reason: 'ptt-max-duration' });
       controller.recordAction({
         kind: 'ptt',
         durationMs: summary?.durationMs ?? 0,
         bytes: summary?.bytes ?? 0,
         peakRms: summary?.peakRms ?? 0,
         avgRms: summary?.avgRms ?? 0,
-        note: 'captured (transcription pending) — session expired at max duration and was NOT submitted',
+        ...diagnostics,
+        note: 'Recording timed out before any speech was detected. Nothing was transcribed.',
       });
     }).catch(() => {});
     if (controller.snapshot().state === 'listening') {
@@ -218,7 +330,9 @@ export function createAssistantService({
    * the transcript through the existing music command router. The buffer is
    * never written to disk and is dropped immediately after transcription.
    */
-  async function submitCapturedUtterance(utterance, reason, summary = null) {
+  async function submitCapturedUtterance(utterance, reason, summary = null, extras = {}) {
+    const diagnostics = extras.diagnostics ?? utteranceDiagnostics(utterance, reason, summary);
+    const transcribeStartedAt = now();
     const target = (listeningEnabled && armedBeforePtt) ? 'armed' : 'disabled';
     // The watchdog path still has an active parec child: stop it here first.
     const micSummary = summary ?? (mic.active() ? mic.stop(reason) : null);
@@ -259,6 +373,8 @@ export function createAssistantService({
       try { controller.transition('interpreting', { reason: 'ptt-empty-capture' }); } catch {}
       controller.recordAction({
         kind: 'ptt', durationMs: 0, bytes: bytes?.length ?? 0,
+        ...diagnostics,
+        transcriptMs: 0,
         note: !effectiveTranscribe ? 'captured — STT not attached' : 'captured — audio too short, discarded',
       });
       return finish(out);
@@ -271,8 +387,15 @@ export function createAssistantService({
       sttOut = await effectiveTranscribe({ pcm: bytes, sampleRate: 16000 });
     } catch (error) {
       sttFailed = true;
-      controller.recordAction({ kind: 'ptt', error: 'stt', note: error?.message?.slice(0, 120) ?? 'stt failed' });
+      controller.recordAction({
+        kind: 'ptt-diagnostic',
+        event: 'stt-error',
+        transcriptMs: now() - transcribeStartedAt,
+        ...diagnostics,
+        note: String(error?.message ?? 'stt failed').slice(0, 120),
+      });
     }
+    const transcribeMs = now() - transcribeStartedAt;
     const text = !sttFailed && sttOut?.status === 'ok' && typeof sttOut.text === 'string' ? sttOut.text.trim() : null;
 
     if (!text) {
@@ -282,11 +405,13 @@ export function createAssistantService({
         ? 'Transcription failed, so I did not catch that request.'
         : status === 'unavailable'
           ? 'Local speech recognition is not set up yet, so nothing was transcribed. Run the STT setup step first.'
-          : "I didn't hear anything I could recognise.";
+          : speechSeenReply(utterance, diagnostics);
       controller.recordAction({
         kind: 'ptt',
         transcript: null,
         bytes: micSummary?.bytes ?? 0,
+        transcriptMs: transcribeMs,
+        ...diagnostics,
         note: sttFailed ? 'STT threw' : `STT status ${status}`,
       });
       return finish({
@@ -296,9 +421,17 @@ export function createAssistantService({
     }
 
     try { controller.transition('interpreting', { reason: 'transcript-ready' }); } catch { /* stay honest */ }
+    controller.recordAction({
+      kind: 'ptt-diagnostic',
+      event: 'transcript-ready',
+      transcriptChars: text.length,
+      transcriptMs: transcribeMs,
+      ...diagnostics,
+      note: 'transcript validated',
+    });
 
     if (!effectiveRunText) {
-      controller.recordAction({ kind: 'ptt', transcript: text, note: 'captured — no command router attached' });
+      controller.recordAction({ kind: 'ptt', transcript: text, transcriptMs: transcribeMs, ...diagnostics, note: 'captured — no command router attached' });
       return finish({
         capture: null, transcript: text, handled: false, executed: false, intent: null,
         reply: `I heard: “${text}” — but no command router is attached.`, speech: null, error: false,
@@ -308,7 +441,7 @@ export function createAssistantService({
     let out;
     try { out = await effectiveRunText(text); } catch (error) {
       const reply = `I heard “${text}” but the command failed.`;
-      controller.recordAction({ kind: 'ptt', transcript: text, error: 'router', note: error?.message?.slice(0, 120) ?? 'router failed' });
+      controller.recordAction({ kind: 'ptt', transcript: text, transcriptMs: transcribeMs, ...diagnostics, error: 'router', note: error?.message?.slice(0, 120) ?? 'router failed' });
       return finish({
         capture: null, transcript: text, handled: false, executed: false, intent: null,
         reply, speech: null, error: true,
@@ -321,6 +454,8 @@ export function createAssistantService({
       intent: out?.intent ?? null,
       reply: out?.reply ?? null,
       executed: Boolean(out?.executed),
+      transcriptMs: transcribeMs,
+      ...diagnostics,
     });
     const speech = out?.speech ?? null;
     if (speech) {
@@ -441,6 +576,7 @@ export function createAssistantService({
       state: snap.state,
       since: snap.since,
       micActive: snap.micActive,
+      hearLevel: snap.hearLevel ?? 0,
       listening: snap.listening,
       cancellable: snap.cancellable,
       wake,

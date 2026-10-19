@@ -158,7 +158,7 @@ export function hotkeyAction(snapshot = {}) {
   const { state = 'disabled', micActive = false } = snapshot ?? {};
   if (state === 'transcribing' || state === 'interpreting' || state === 'executing'
     || state === 'speaking' || state === 'awaiting_confirmation') return 'busy';
-  if (state === 'listening' || micActive) return 'stop';
+  if (state === 'listening' || state === 'hearing' || micActive) return 'stop';
   if (state === 'disabled' || state === 'armed' || state === 'error') return 'start';
   return 'start';
 }
