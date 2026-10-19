@@ -171,15 +171,32 @@ test('several matches ask instead of guessing — nothing plays', async () => {
   assert.deepEqual(ctx.calls, [], 'no track is selected on ambiguity');
 });
 
-test('a fuzzy near-miss is offered, never auto-played', async () => {
+test('a single fuzzy near-miss auto-plays as the one clear match', async () => {
   const ctx = fakePlayer();
   const result = await runMusicCommand(
     { intent: 'play', query: 'madiraa' },
     { player: ctx.player, searchRanked: searcher([track({ tier: 'fuzzy' })]) },
   );
+  assert.equal(result.executed, true);
+  assert.match(result.reply, /Playing Madira\.?$/);
+  assert.ok(ctx.calls.some((call) => call[0] === 'play'), 'the single near-match plays');
+});
+
+test('several fuzzy candidates stay suggestions — nothing plays', async () => {
+  const ctx = fakePlayer();
+  const result = await runMusicCommand(
+    { intent: 'play', query: 'madiraa' },
+    {
+      player: ctx.player,
+      searchRanked: searcher([
+        track({ id: 'aaaaaaaaaaaaaaaa', name: 'Madira', file: 'Madira.mp3', tier: 'fuzzy' }),
+        track({ id: 'bbbbbbbbbbbbbbbb', name: 'Madira Live', file: 'live/Madira.mp3', tier: 'fuzzy' }),
+      ]),
+    },
+  );
   assert.equal(result.executed, false);
-  assert.match(result.reply, /Did you mean Madira\?/);
-  assert.deepEqual(ctx.calls, [], 'weak matches never play');
+  assert.match(result.reply, /Did you mean/);
+  assert.deepEqual(ctx.calls, [], 'ambiguous weak matches never play');
 });
 
 test('no match says so honestly', async () => {

@@ -245,18 +245,22 @@ export function createSparkieeServer({
       };
     }
 
-    // Speak only confirmed, meaningful replies — same gate as the endpoint.
-    let speech = null;
-    if (result.reply && canSpeakAssistant() && assistantSpeechAllowed()) {
+    // Report every assistant outcome on the pet: ElevenLabs speaks it when
+    // ready; without a key the voice service still announces the caption and
+    // falls back to chirps, so Sparky never goes silent after acting.
+    const speech = petController.snapshot()?.settings?.speech;
+    const voiceEnabled = Boolean(speech) && speech.enabled !== false;
+    let speechClip = null;
+    if (result.reply && voiceEnabled && assistantSpeechAllowed()) {
       try {
         const snapshot = await voiceService.speak(result.reply, { source: 'assistant' });
-        speech = snapshot.speech ?? null;
-        if (speech?.clipId && musicService.duckForSpeech) {
+        speechClip = snapshot.speech ?? null;
+        if (speechClip?.clipId && musicService.duckForSpeech) {
           const estimateMs = Math.min(7000, 700 + result.reply.length * 65);
           musicService.duckForSpeech(estimateMs);
         }
       } catch {
-        speech = null; // the textual reply remains truthful either way
+        speechClip = null; // the textual reply remains truthful either way
       }
     }
 
@@ -275,7 +279,7 @@ export function createSparkieeServer({
       intent: intent.intent,
       reply: result.reply,
       executed: Boolean(result.executed),
-      speech,
+      speech: speechClip,
       candidates: result.candidates ?? undefined,
       matches: result.matches ?? undefined,
       suggestions: result.suggestions ?? undefined,

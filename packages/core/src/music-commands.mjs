@@ -165,9 +165,12 @@ async function resolvePlayQuery(query, searchRanked) {
   if (unavailableMatches.length > 0) {
     return { status: 'unavailable', track: unavailableMatches[0] };
   }
-  // Fuzzy near-misses are suggestions, never automatic selections.
+  // Fuzzy near-misses stay suggestions for anything ambiguous — but when the
+  // whole library has exactly ONE near-match ("play madieira" → "Madira"),
+  // speaking it back as a question is friction without benefit: auto-play it.
   const fuzzy = ranked.filter((track) => track.tier === 'fuzzy' && track.available);
-  if (fuzzy.length > 0) return { status: 'not_found', suggestions: fuzzy.slice(0, 3) };
+  if (fuzzy.length === 1) return { status: 'matched', track: fuzzy[0] };
+  if (fuzzy.length > 1) return { status: 'not_found', suggestions: fuzzy.slice(0, 3) };
   return { status: 'not_found', suggestions: [] };
 }
 
