@@ -887,7 +887,8 @@ export function createSparkieeServer({
         ? hotkey.snapshot().shortcut
         : { enabled: true, accelerator: 'Control+Alt+Space', registered: null, registrationDetail: null };
       if (!assistantService) {
-        sendJson(response, 200, { ok: true, assistant: { state: 'disabled', wake: { status: 'needs-setup', missing: ['no-service'] }, shortcut } });
+        const gnome = await gnomeKeybindingInfo();
+        sendJson(response, 200, { ok: true, assistant: { state: 'disabled', wake: { status: 'needs-setup', missing: ['no-service'] }, shortcut: { ...shortcut, keybinding: gnome } } });
         return;
       }
       const snap = await assistantService.status();
