@@ -8,6 +8,7 @@ import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayloa
 import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 import { parseMusicIntent, runMusicCommand } from '../../core/src/music-commands.mjs';
+import { createAssistantService } from './assistant-service.mjs';
 
 const DASHBOARD_ROOT = fileURLToPath(new URL('../../dashboard/', import.meta.url));
 const SHARED_LIB_ROOT = fileURLToPath(new URL('../../pet-host/renderer/lib/', import.meta.url));
@@ -135,6 +136,7 @@ export function createSparkieeServer({
   getPackDetail = async () => null,
   musicService = null,
   voiceService = null,
+  assistantService = null,
   refreshVoiceConfig = async () => ({ configured: false, warnings: [] }),
   isVoiceReady = () => false,
   agentNow = () => Date.now(),
@@ -689,6 +691,18 @@ export function createSparkieeServer({
         }
       }
 
+      // Keep the assistant's own action ledger honest: every routed text
+      // command is recorded, whether or not it changed playback.
+      if (assistantService?.recordAction) {
+        assistantService.recordAction({
+          kind: 'command',
+          text: String(payload.text ?? ''),
+          intent: intent.intent,
+          reply: result.reply ?? null,
+          executed: Boolean(result.executed),
+        });
+      }
+
       sendJson(response, 200, {
         ok: true,
         handled: true,
@@ -702,6 +716,110 @@ export function createSparkieeServer({
         track: result.track ?? undefined,
         playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
       });
+      return;
+    }
+    // -------------------------------------------------------------------------
+    // Assistant state & control: public status, gated commands.
+    // -------------------------------------------------------------------------
+    if (method === 'GET' && pathname === '/api/v1/assistant/status') {
+      if (!assistantService) {
+        sendJson(response, 200, { ok: true, assistant: { state: 'disabled', wake: { status: 'needs-setup', missing: ['no-service'] } } });
+        return;
+      }
+      const snap = await assistantService.status();
+      // Populate mic devices lazily (cached 10s in the service would be ideal;
+      // here we just call listDevices and cache briefly on the server).
+      if (assistantService._mic && typeof assistantService._mic.listDevices === 'function') {
+        try {
+          const devices = await assistantService._mic.listDevices();
+          snap.mic.devices = devices;
+        } catch {
+          snap.mic.devices = [];
+        }
+      }
+      sendJson(response, 200, { ok: true, assistant: snap });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/assistant/listen') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!assistantService) {
+        sendJson(response, 503, { error: 'Assistant unavailable.' });
+        return;
+      }
+      let payload;
+      try { payload = await readJsonBody(request); } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!payload || typeof payload.enabled !== 'boolean') {
+        sendJson(response, 400, { error: 'Expected { enabled: boolean }.' });
+        return;
+      }
+      try {
+        await assistantService.setListening(payload.enabled);
+      } catch (error) {
+        if (error?.code === 'WAKE_NEEDS_SETUP') {
+          sendJson(response, 400, { error: 'Wake word is not configured.', setup: error.setup });
+          return;
+        }
+        sendJson(response, 500, { error: error?.message ?? 'Failed to change listening state.' });
+        return;
+      }
+      const snap = await assistantService.status();
+      sendJson(response, 200, { ok: true, assistant: snap });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/assistant/ptt/start') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!assistantService) {
+        sendJson(response, 503, { error: 'Assistant unavailable.' });
+        return;
+      }
+      try {
+        const { sessionId, done } = await assistantService.startPtt();
+        const snap = await assistantService.status();
+        sendJson(response, 200, { ok: true, assistant: snap, sessionId });
+      } catch (error) {
+        if (error?.code === 'MIC_BUSY') {
+          sendJson(response, 409, { error: 'The microphone is already in use.' });
+          return;
+        }
+        sendJson(response, 503, { error: error?.message ?? 'Microphone unavailable.' });
+      }
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/assistant/ptt/stop') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!assistantService) {
+        sendJson(response, 503, { error: 'Assistant unavailable.' });
+        return;
+      }
+      const summary = await assistantService.stopPtt();
+      const snap = await assistantService.status();
+      sendJson(response, 200, { ok: true, assistant: snap, capture: summary });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/assistant/mic/diagnose') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!assistantService) {
+        sendJson(response, 503, { error: 'Assistant unavailable.' });
+        return;
+      }
+      const diag = await assistantService.runDiagnostic();
+      const snap = await assistantService.status();
+      sendJson(response, 200, { ok: true, assistant: snap, mic: diag });
       return;
     }
     // -------------------------------------------------------------------------

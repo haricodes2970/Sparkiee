@@ -922,3 +922,163 @@ test('assistant commands are throttled and 503 without a music service', async (
     await close(bare.server);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Assistant endpoints: status, listen, PTT, diagnose — auth, errors, honesty.
+// ---------------------------------------------------------------------------
+
+function assistantEndpointStub() {
+  let state = 'disabled';
+  let listeningEnabled = false;
+  let micActive = false;
+  const serviceStub = {
+    lastAction: null,
+    status: () => ({
+      state,
+      since: new Date().toISOString(),
+      micActive,
+      listening: listeningEnabled,
+      cancellable: state === 'listening',
+      wake: { phrase: 'Yo Spark', provider: 'porcupine', status: 'needs-setup', missing: ['node-module'], accessKeyPresent: false, keywordModel: { present: false, name: null }, detail: 'needs setup' },
+      mic: { devices: [{ id: 'test-mic', description: 'Test' }], active: micActive ? { id: 's1', label: 'ptt', device: 'default', startedAt: new Date().toISOString(), elapsedMs: 100 } : null },
+      lastAction: serviceStub.lastAction,
+      lastError: null,
+      history: [],
+    }),
+    setListening: async (enabled) => {
+      if (enabled) throw Object.assign(new Error('WAKE_NEEDS_SETUP'), { code: 'WAKE_NEEDS_SETUP', setup: { status: 'needs-setup', missing: ['node-module'] } });
+      listeningEnabled = false; state = 'disabled'; return { state: 'disabled' };
+    },
+    startPtt: async () => {
+      if (micActive) throw Object.assign(new Error('MIC_BUSY'), { code: 'MIC_BUSY' });
+      micActive = true;
+      listeningEnabled = true;
+      state = 'listening';
+      return { sessionId: 'ptt-1', done: Promise.resolve({ id: 'ptt-1', durationMs: 500, bytes: 16000, peakRms: 800, avgRms: 400, reason: 'manual', error: null }) };
+    },
+    stopPtt: async () => {
+      micActive = false;
+      listeningEnabled = false;
+      state = 'disabled';
+      return { id: 'ptt-1', durationMs: 500, bytes: 16000, peakRms: 800, avgRms: 400, reason: 'manual', error: null };
+    },
+    runDiagnostic: async () => ({ ok: true, peakRms: 800, avgRms: 400, durationMs: 1500, bytes: 48000, error: null }),
+    recordAction: (a) => { serviceStub.lastAction = a; },
+  };
+  return serviceStub;
+}
+
+
+test('assistant status is public on loopback', async () => {
+  const instance = await startServer({ assistantService: assistantEndpointStub() });
+  try {
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/status`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.ok(body.assistant.state);
+    assert.equal(body.assistant.wake.status, 'needs-setup');
+  } finally { await close(instance.server); }
+});
+
+test('assistant listen, ptt, diagnose are auth-gated', async () => {
+  const instance = await startServer({ assistantService: assistantEndpointStub() });
+  try {
+    const endpoints = [
+      ['POST', '/api/v1/assistant/listen', { enabled: true }],
+      ['POST', '/api/v1/assistant/ptt/start', {}],
+      ['POST', '/api/v1/assistant/ptt/stop', {}],
+      ['POST', '/api/v1/assistant/mic/diagnose', {}],
+    ];
+    for (const [method, path, body] of endpoints) {
+      const res = await fetch(`http://127.0.0.1:${instance.port}${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      assert.equal(res.status, 403, `${method} ${path} → 403 without auth`);
+    }
+  } finally { await close(instance.server); }
+});
+
+test('assistant listen with unconfigured wake returns 400 + setup detail', async () => {
+  const instance = await startServer({ assistantService: assistantEndpointStub() });
+  try {
+    const h = { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` };
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/listen`, { method: 'POST', headers: h, body: JSON.stringify({ enabled: true }) });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.match(body.error, /Wake word is not configured/);
+    assert.ok(body.setup);
+    assert.ok(body.setup.missing.includes('node-module'));
+  } finally { await close(instance.server); }
+});
+
+test('assistant listen off works without setup', async () => {
+  const instance = await startServer({ assistantService: assistantEndpointStub() });
+  try {
+    const h = { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` };
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/listen`, { method: 'POST', headers: h, body: JSON.stringify({ enabled: false }) });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.assistant.state, 'disabled');
+  } finally { await close(instance.server); }
+});
+
+test('assistant PTT start/stop returns capture summary', async () => {
+  const instance = await startServer({ assistantService: assistantEndpointStub() });
+  try {
+    const h = { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` };
+    const start = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/ptt/start`, { method: 'POST', headers: h, body: '{}' });
+    assert.equal(start.status, 200);
+    const startBody = await start.json();
+    assert.equal(startBody.assistant.state, 'listening');
+    assert.ok(startBody.sessionId);
+    const stop = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/ptt/stop`, { method: 'POST', headers: h, body: '{}' });
+    assert.equal(stop.status, 200);
+    const stopBody = await stop.json();
+    assert.ok(stopBody.capture);
+    assert.equal(stopBody.capture.reason, 'manual');
+  } finally { await close(instance.server); }
+});
+
+test('assistant PTT busy returns 409', async () => {
+  const instance = await startServer({ assistantService: assistantEndpointStub() });
+  try {
+    const h = { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` };
+    await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/ptt/start`, { method: 'POST', headers: h, body: '{}' });
+    const second = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/ptt/start`, { method: 'POST', headers: h, body: '{}' });
+    assert.equal(second.status, 409);
+  } finally { await close(instance.server); }
+});
+
+test('assistant mic diagnose returns levels', async () => {
+  const instance = await startServer({ assistantService: assistantEndpointStub() });
+  try {
+    const h = { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` };
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/mic/diagnose`, { method: 'POST', headers: h, body: '{}' });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.mic.ok, true);
+    assert.ok(body.mic.peakRms > 0);
+  } finally { await close(instance.server); }
+});
+
+test('assistant endpoints 503 without service', async () => {
+  const instance = await startServer({});
+  try {
+    const h = { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` };
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/ptt/start`, { method: 'POST', headers: h, body: '{}' });
+    assert.equal(res.status, 503);
+  } finally { await close(instance.server); }
+});
+
+test('assistant command records action in service', async () => {
+  const svc = assistantEndpointStub();
+  const instance = await startServer({ musicService: assistantServiceStub(), assistantService: svc, assistantThrottleMs: 0 });
+  try {
+    const h = { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` };
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/command`, { method: 'POST', headers: h, body: JSON.stringify({ text: 'play Madira' }) });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.executed, true);
+    assert.ok(svc.lastAction);
+    assert.equal(svc.lastAction.kind, 'command');
+  } finally { await close(instance.server); }
+});

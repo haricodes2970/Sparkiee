@@ -13,6 +13,7 @@ import { createAudioCache } from '../../core/src/audio-cache.mjs';
 import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
 import { withoutSecrets } from '../../core/src/env-safety.mjs';
 import { createVoiceService } from './voice-service.mjs';
+import { createAssistantService } from './assistant-service.mjs';
 import { createSparkieeServer } from './server.mjs';
 import { createMusicLibrary } from '../../core/src/music-library.mjs';
 import { createMusicPlayer } from '../../core/src/music-player.mjs';
@@ -55,6 +56,7 @@ async function describeCharacters() {
 let httpServer;
 let petHost;
 let musicPlayerRuntime;
+let assistantService;
 let shuttingDown = false;
 
 // Pack detail for the dashboard habitat lives in pack-detail.mjs (shared
@@ -260,6 +262,13 @@ async function shutdown(reason) {
       // best effort — shutdown continues
     }
   }
+  if (assistantService) {
+    try {
+      assistantService.dispose(); // stops mic + wake listener
+    } catch {
+      // best effort — shutdown continues
+    }
+  }
   if (petHost && !petHost.killed) {
     petHost.kill('SIGTERM');
     const childToKill = petHost;
@@ -295,6 +304,8 @@ async function main() {
   void musicLibrary.prime().catch(() => {});
   // One daemon-owned playback child survives desktop↔dashboard handoffs.
   musicPlayerRuntime = createMusicPlayer({ library: musicLibrary });
+  // Assistant: state machine + mic + wake (Porcupine) + PTT.
+  assistantService = createAssistantService();
   httpServer = createSparkieeServer({
     port,
     token,
@@ -324,6 +335,7 @@ async function main() {
       updateSettings: (payload) => musicPlayerRuntime.updateSettings(payload),
     },
     voiceService,
+    assistantService,
     refreshVoiceConfig: () => refreshVoiceConfig(),
     isVoiceReady: () => getVoiceConfig().configured === true,
   });
