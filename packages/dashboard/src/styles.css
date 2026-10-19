@@ -993,6 +993,25 @@ h1 {
   color: var(--cream-dim);
 }
 
+/* Pixel-styled hearing meter for the dashboard. Only visible when the
+   assistant is genuinely hearing (capture live + state === 'hearing'). */
+.hearing-bar {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 10px;
+  margin-left: 10px;
+  vertical-align: middle;
+}
+
+.hearing-bar i {
+  display: block;
+  width: 3px;
+  height: 2px;
+  background: var(--mint);
+  image-rendering: pixelated;
+}
+
 .footer-dot {
   flex: none;
   width: 7px;

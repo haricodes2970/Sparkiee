@@ -15,6 +15,7 @@ export const SUPPORTED_ANIMATION_IDS = Object.freeze([
   'task_complete',
   'task_error',
   'permission_required',
+  'hearing',
 ]);
 
 export const SUPPORTED_AUDIO_FORMATS = Object.freeze(['.wav', '.ogg', '.mp3']);

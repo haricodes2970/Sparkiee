@@ -156,6 +156,21 @@ contextBridge.exposeInMainWorld('sparkieePet', Object.freeze({
     return () => ipcRenderer.removeListener('pet:assistant', listener);
   },
   /**
+   * Hearing meter: a throttled stream of the derived 0..1 level while a
+   * capture is live. Never raw audio.
+   */
+  onAssistantLevel(callback) {
+    if (typeof callback !== 'function') return () => {};
+    const listener = (_event, meter) => {
+      if (!meter || typeof meter !== 'object') return;
+      const level = Number(meter.level);
+      if (!Number.isFinite(level)) return;
+      callback({ level: Math.min(1, Math.max(0, level)) });
+    };
+    ipcRenderer.on('pet:assistant-level', listener);
+    return () => ipcRenderer.removeListener('pet:assistant-level', listener);
+  },
+  /**
    * Escape pressed inside the pet window: discard the utterance in flight.
    * Only meaningful while capture is active; the server treats a redundant
    * cancel as a no-op.

@@ -1,6 +1,6 @@
 import { createAudioEngine } from './lib/audio-engine.mjs';
 import { createCaptionController } from './lib/caption.mjs';
-import { describeMicIndicator } from './lib/mic-indicator.mjs';
+import { describeHearingMeter, describeMicIndicator, hearingBars } from './lib/mic-indicator.mjs';
 import { createFramePlayer } from './lib/frame-player.mjs';
 import { shouldFallbackChirp, shouldPlayEventChirp, speechCaptionDuration } from './lib/speech-policy.mjs';
 
@@ -179,7 +179,7 @@ function applyState(state) {
   if (state.settings?.audio) audio.setSettings(state.settings.audio);
 
   const animation = currentPack?.animations?.[state.animation] ? state.animation : 'idle';
-  if (currentPack) spritePlayer.play(currentPack, animation);
+  if (currentPack) spritePlayer.play(currentPack, preferredAnimation(animation));
 
   // Default caption follows the state message, but an active spoken phrase
   // keeps the floor until its caption window ends.
@@ -241,7 +241,31 @@ window.sparkieePet.getPack().then(applyPack).catch(() => {});
 
 const micIndicator = document.querySelector('#mic-indicator');
 const micIndicatorLabel = document.querySelector('#mic-indicator-label');
+const micWave = document.querySelector('#mic-wave');
+const micBars = micWave ? Array.from(micWave.querySelectorAll('i')) : [];
 let assistantPhase = null;
+let hearLevel = 0;
+
+/**
+ * The attentive hearing pose is an animation in the character pack (no second
+ * pet, no extra window). Packs without it keep their normal state animation
+ * instead of faking one; the meter below still reports the real level.
+ */
+function preferredAnimation(stateAnimation) {
+  if (assistantPhase?.state === 'hearing' && assistantPhase.micActive === true
+    && currentPack?.animations?.hearing) {
+    return 'hearing';
+  }
+  return stateAnimation;
+}
+
+function paintHearingMeter() {
+  if (!micBars.length) return;
+  const bars = hearingBars(hearLevel);
+  for (let i = 0; i < micBars.length; i += 1) {
+    micBars[i].style.height = `${bars[i] ?? 2}px`;
+  }
+}
 
 function updateMicIndicator() {
   if (!micIndicator) return;
@@ -249,17 +273,31 @@ function updateMicIndicator() {
   micIndicator.hidden = !info.visible;
   micIndicator.dataset.phase = info.phase ?? '';
   micIndicatorLabel.textContent = info.label ?? '';
+  const meter = describeHearingMeter({ assistant: assistantPhase });
+  if (!meter.visible) hearLevel = 0;
+  paintHearingMeter();
 }
 
 window.sparkieePet.onAssistant((assistant) => {
   assistantPhase = assistant;
   updateMicIndicator();
+  if (currentPack) {
+    spritePlayer.play(currentPack, preferredAnimation(currentState?.animation || 'idle'));
+  }
 });
+// Only the derived 0..1 level arrives; the daemon never sends raw audio.
+if (typeof window.sparkieePet.onAssistantLevel === 'function') {
+  window.sparkieePet.onAssistantLevel(({ level }) => {
+    hearLevel = level;
+    paintHearingMeter();
+  });
+}
 window.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   // Only when capture is genuinely live; a random Escape press must not
   // cancel unrelated assistant work.
   if (assistantPhase && (assistantPhase.micActive === true
+    || assistantPhase.state === 'hearing'
     || assistantPhase.state === 'transcribing' || assistantPhase.state === 'interpreting')) {
     window.sparkieePet.cancelUtterance().catch(() => {});
   }

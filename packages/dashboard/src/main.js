@@ -41,6 +41,9 @@ const assistantStateText = document.querySelector('#assistant-state-text');
 const assistantHotkeyText = document.querySelector('#assistant-hotkey-text');
 const assistantWakeSttText = document.querySelector('#assistant-wake-stt-text');
 const assistantMicText = document.querySelector('#assistant-mic-text');
+const assistantHearingRow = document.querySelector('#assistant-hearing-row');
+const assistantHearingBar = document.querySelector('#assistant-hearing-bar');
+const assistantHearingBars = assistantHearingBar ? Array.from(assistantHearingBar.querySelectorAll('i')) : [];
 const assistantTranscriptText = document.querySelector('#assistant-transcript-text');
 const assistantLastActionText = document.querySelector('#assistant-last-action-text');
 const assistantPttButton = document.querySelector('#assistant-ptt');
@@ -783,6 +786,16 @@ function applyAssistantState(vm) {
   assistantHotkeyText.textContent = `Hotkey — ${vm.hotkeyLabel}`;
   assistantWakeSttText.textContent = `Wake word: ${vm.wakeLabel} · Speech recognition: ${vm.sttLabel}`;
   assistantMicText.textContent = `Microphone — ${vm.micLabel}`;
+  // Hearing meter: pixel-styled bars driven by the backend's real 0..1 level.
+  // Only visible while the assistant is genuinely hearing (capture live + state).
+  const hearing = vm.hearLevel > 0 && vm.state === 'hearing';
+  if (assistantHearingRow) assistantHearingRow.hidden = !hearing;
+  if (hearing && assistantHearingBars.length) {
+    const bars = [0.55, 1, 0.72, 0.9].map((w) => Math.round(2 + vm.hearLevel * w * 8));
+    for (let i = 0; i < assistantHearingBars.length; i += 1) {
+      assistantHearingBars[i].style.height = `${bars[i] ?? 2}px`;
+    }
+  }
   if (vm.transcript) {
     assistantTranscriptText.textContent = `Heard: ${vm.transcript}`;
   } else {

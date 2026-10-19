@@ -26,6 +26,7 @@ const PACK_ROOTS = [
 let petWindow;
 let pollTimer;
 let hotkeySyncTimer;
+let levelTimer;
 let lastState = '';
 let latestState = null;
 let dragOrigin = null;
@@ -336,6 +337,7 @@ async function pollState() {
 
 /** Push assistant phase changes to the renderer (mic indicator, ESC cancel). */
 let lastAssistantSerialised = '';
+let assistantCaptureActive = false;
 async function pollAssistant() {
   let assistant = null;
   try {
@@ -343,6 +345,7 @@ async function pollAssistant() {
   } catch {
     assistant = null; // unreachable: keep last known phase
   }
+  assistantCaptureActive = assistant?.micActive === true;
   const serialised = assistant ? JSON.stringify(assistant) : '';
   if (serialised === lastAssistantSerialised) return assistant;
   lastAssistantSerialised = serialised;
@@ -353,6 +356,49 @@ async function pollAssistant() {
       : null);
   }
   return assistant;
+}
+
+// ---------------------------------------------------------------------------
+// Hearing meter: a throttled stream of the *derived* 0..1 level while a
+// capture is genuinely live. Raw audio never leaves the daemon. The renderer
+// gets ~8 updates/s, and only when the level actually moved, so the pet can
+// react to real incoming audio without burning CPU.
+// ---------------------------------------------------------------------------
+const LEVEL_PUMP_MS = 120;
+const LEVEL_MIN_DELTA = 0.03;
+let levelBusy = false;
+let lastSentLevel = -1;
+let lastLevelSentAt = 0;
+async function pumpListenLevel() {
+  if (levelBusy || quitting) return;
+  if (!petWindow || petWindow.isDestroyed()) return;
+  if (!assistantCaptureActive) {
+    if (lastSentLevel !== -1) {
+      lastSentLevel = -1; // next capture starts from a clean slate
+    }
+    return;
+  }
+  levelBusy = true;
+  try {
+    const meter = await requestApi('/api/v1/assistant/listen-level');
+    if (!meter || meter.micActive !== true) {
+      levelBusy = false;
+      return;
+    }
+    const level = Math.min(1, Math.max(0, Number(meter.level) || 0));
+    const changed = Math.abs(level - lastSentLevel) >= LEVEL_MIN_DELTA;
+    const heartbeatDue = Date.now() - lastLevelSentAt >= 1000;
+    if (!changed && !heartbeatDue) return;
+    lastSentLevel = level;
+    lastLevelSentAt = Date.now();
+    if (petWindow && !petWindow.isDestroyed()) {
+      petWindow.webContents.send('pet:assistant-level', { level });
+    }
+  } catch {
+    // Unreachable runtime: the meter simply stops; the honest phase text stays.
+  } finally {
+    levelBusy = false;
+  }
 }
 
 /** Ask the live runtime who actually owns the desktop pet host. */
@@ -630,6 +676,7 @@ app.whenReady().then(async () => {
   await pollState();
   pollTimer = setInterval(() => void pollState(), POLL_MS);
   hotkeySyncTimer = setInterval(() => void syncShortcutFromSettings(), 6000);
+  levelTimer = setInterval(() => void pumpListenLevel(), LEVEL_PUMP_MS);
   app.on('activate', () => {
     if (desktopWindowVisible(latestState) && (!petWindow || petWindow.isDestroyed())) {
       petWindow = createPetWindow();
@@ -643,6 +690,7 @@ app.whenReady().then(async () => {
     quitting = true;
     if (pollTimer) clearInterval(pollTimer);
     if (hotkeySyncTimer) clearInterval(hotkeySyncTimer);
+    if (levelTimer) clearInterval(levelTimer);
     movement?.stop();
     hotkey.dispose();
     ipcMain.removeHandler('pet:command');

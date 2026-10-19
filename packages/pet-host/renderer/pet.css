@@ -214,6 +214,51 @@ html, body {
   vertical-align: middle;
 }
 
+.mic-indicator[data-phase="hearing"] .mic-indicator-dot {
+  background: #7ce38b;
+  animation: mic-dot-pulse 900ms steps(2, end) infinite;
+}
+
+/* Pixel-styled hearing meter: uneven bars whose heights follow the real
+   0..1 level stream from the daemon. Hidden outside the hearing phase so a
+   silent microphone never shows a fabricated waveform. */
+.mic-wave {
+  display: none;
+  align-items: flex-end;
+  gap: 2px;
+  height: 10px;
+  margin-left: 7px;
+  vertical-align: middle;
+}
+
+.mic-indicator[data-phase="hearing"] .mic-wave {
+  display: inline-flex;
+}
+
+.mic-wave i {
+  display: block;
+  width: 3px;
+  height: 2px;
+  background: #7ce38b;
+  image-rendering: pixelated;
+}
+
+@keyframes mic-dot-pulse {
+  0% { opacity: 1; }
+  100% { opacity: 0.35; }
+}
+
+.mic-indicator[data-phase="listening"] .mic-indicator-dot {
+  animation: mic-dot-pulse 1200ms steps(2, end) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mic-indicator[data-phase="hearing"] .mic-indicator-dot,
+  .mic-indicator[data-phase="listening"] .mic-indicator-dot {
+    animation: none;
+  }
+}
+
 .mic-indicator[data-phase="transcribing"] .mic-indicator-dot,
 .mic-indicator[data-phase="working"] .mic-indicator-dot {
   background: #ffd166;

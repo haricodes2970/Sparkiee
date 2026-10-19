@@ -590,6 +590,20 @@ export function createAssistantService({
     };
   }
 
+  /**
+   * Minimal, cheap snapshot for the renderer's hearing visualiser. Deliberately
+   * excludes wake probes and device lists: this is polled ~8x/second while a
+   * capture is live and must stay synchronous and allocation-light.
+   */
+  function listenLevel() {
+    const snap = controller.snapshot();
+    return {
+      state: snap.state,
+      micActive: snap.micActive === true,
+      level: snap.micActive ? snap.hearLevel ?? 0 : 0,
+    };
+  }
+
   function recordAction(action) {
     controller.recordAction(action);
   }
@@ -601,6 +615,7 @@ export function createAssistantService({
 
   return {
     status,
+    listenLevel,
     setListening,
     startPtt,
     stopPtt,

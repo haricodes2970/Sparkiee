@@ -319,6 +319,14 @@ const star = (x, y) => (g) => {
   g.px(x, y - 1, C.spark); g.px(x, y + 1, C.spark);
 };
 
+const waveBar = (x, y, phase) => (g) => {
+  const heights = [4, 6, 3, 2];
+  const h = heights[phase % 4];
+  for (let i = 0; i < h; i += 1) {
+    g.px(x, y - i, C.tealLight);
+  }
+};
+
 // ---------------------------------------------------------------------------
 // Animation frame tables
 // ---------------------------------------------------------------------------
@@ -407,6 +415,11 @@ push({ eyes: 'droop', mouth: 'flat', tuft: 1, extras: [sweat(24, 11)] });
 push({ dy: -1, eyes: 'wide', mouth: 'o', armR: 'up', extras: [bang(23, 6)] });
 push({ dy: 0, eyes: 'wide', mouth: 'o', armR: 'up', tuft: 1, extras: [bang(24, 5)] });
 push({ dy: -1, eyes: 'wide', mouth: 'flat', armR: 'up', extras: [bang(23, 4)] });
+
+// hearing (3): attentive pose with reactive sound-wave particles
+push({ dy: -1, eyes: 'up', mouth: 'flat', tuft: 1, armL: 'out', armR: 'out', extras: [waveBar(8, 12, 0), waveBar(14, 10, 1), waveBar(20, 8, 2), waveBar(26, 6, 3)] });
+push({ dy: 0, eyes: 'up', mouth: 'flat', tuft: -1, armL: 'out', armR: 'out', extras: [waveBar(8, 10, 1), waveBar(14, 12, 2), waveBar(20, 6, 3), waveBar(26, 4, 0)] });
+push({ dy: -1, eyes: 'up', mouth: 'smile', tuft: 1, armL: 'out', armR: 'out', extras: [waveBar(8, 8, 2), waveBar(14, 6, 3), waveBar(20, 4, 0), waveBar(26, 10, 1)] });
 
 // ---------------------------------------------------------------------------
 // Compose sheet + write PNG

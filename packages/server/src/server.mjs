@@ -882,6 +882,15 @@ export function createSparkieeServer({
     // -------------------------------------------------------------------------
     // Assistant state & control: public status, gated commands.
     // -------------------------------------------------------------------------
+    if (method === 'GET' && pathname === '/api/v1/assistant/listen-level') {
+      // Cheap live meter for the pet visualiser. Same authority as status but
+      // no wake probe / device enumeration; public like the status endpoint.
+      const level = assistantService && typeof assistantService.listenLevel === 'function'
+        ? assistantService.listenLevel()
+        : { state: 'disabled', micActive: false, level: 0 };
+      sendJson(response, 200, { ok: true, ...level });
+      return;
+    }
     if (method === 'GET' && pathname === '/api/v1/assistant/status') {
       const shortcut = hotkey
         ? hotkey.snapshot().shortcut

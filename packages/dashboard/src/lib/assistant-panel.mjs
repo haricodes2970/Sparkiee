@@ -12,6 +12,7 @@ const STATE_LABELS = Object.freeze({
   armed: 'Waiting for "Yo Spark"',
   wake_detected: 'Heard "Yo Spark" — listening',
   listening: 'Listening',
+  hearing: 'Hearing',
   transcribing: 'Transcribing',
   interpreting: 'Working it out',
   executing: 'Executing',
@@ -20,7 +21,7 @@ const STATE_LABELS = Object.freeze({
   error: 'Error',
 });
 
-const BUSY_STATES = Object.freeze(new Set(['wake_detected', 'listening', 'transcribing', 'interpreting', 'executing', 'speaking', 'awaiting_confirmation']));
+const BUSY_STATES = Object.freeze(new Set(['wake_detected', 'listening', 'hearing', 'transcribing', 'interpreting', 'executing', 'speaking', 'awaiting_confirmation']));
 
 function shortAccelerator(accelerator) {
   return String(accelerator ?? 'Control+Alt+Space')
@@ -82,7 +83,8 @@ export function assistantPanelViewModel(payload = {}) {
     testBusy: false,
     busy,
     startEnabled: !busy,
-    stopEnabled: state === 'listening' || assistant.micActive === true,
+    stopEnabled: (state === 'listening' || state === 'hearing') || assistant.micActive === true,
     cancelEnabled: assistant.cancellable === true,
+    hearLevel: assistant.micActive === true && state === 'hearing' ? Math.max(0, Math.min(1, Number(assistant.hearLevel) || 0)) : 0,
   };
 }
