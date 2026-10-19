@@ -14,6 +14,12 @@ export function createAssistantService({
   wakeProbe = probeWakeWordSetup,
   createDetector = null, // injected for tests; real lazy-required in default
   micSessionManager = null, // injected for tests
+  stt = null, // optional { transcribe({pcm}), cancel() } — commit-3 pipeline
+  runIntent = null, // optional async (text) => {handled, reply, executed, ...}
+  setIntervalImpl = (fn, ms) => { const t = setInterval(fn, ms); t?.unref?.(); return t; },
+  clearIntervalImpl = (id) => clearInterval(id),
+  speechRmsThreshold = 500,
+  minUtteranceBytes = 3200, // <100 ms of 16 kHz s16le is noise, not speech
 } = {}) {
   let wakeProbeCached = null;
   let wakeProbeAt = 0;
@@ -25,6 +31,25 @@ export function createAssistantService({
   let wakeListener = null;
   let listeningEnabled = false;
   let armedBeforePtt = false;
+
+  // Transcript pipeline (capture buffer stays in RAM only).
+  let executor = null; // attached by the server: {transcribe, cancelTranscribe, runText}
+  let capture = null; // {buffer, watchdogId, speechSeen, lastLoudAt, silenceMs, settled, result}
+  function rmsOf(chunk) {
+    if (!chunk || chunk.length < 2) return 0;
+    let sum = 0;
+    for (let i = 0; i + 1 < chunk.length; i += 2) {
+      const sample = chunk.readInt16LE(i);
+      sum += sample * sample;
+    }
+    const n = Math.floor(chunk.length / 2);
+    return n > 0 ? Math.round(Math.sqrt(sum / n)) : 0;
+  }
+  function stopWatchdog() {
+    if (capture?.watchdogId !== undefined && capture?.watchdogId !== null) {
+      try { clearIntervalImpl(capture.watchdogId); } catch { /* already gone */ }
+    }
+  }
 
   async function getWakeSetup() {
     if (wakeProbeCached && now() - wakeProbeAt < WAKE_PROBE_TTL) return wakeProbeCached;
@@ -113,21 +138,42 @@ export function createAssistantService({
     });
   }
 
-  async function startPtt() {
+  async function startPtt({ silenceMs = 1200, durationMs = 15000 } = {}) {
     if (mic.active()) {
       throw Object.assign(new Error('MIC_BUSY'), { code: 'MIC_BUSY' });
     }
     armedBeforePtt = controller.snapshot().state === 'armed';
+    const utterance = { buffer: [], speechSeen: false, lastLoudAt: now(), silenceMs, settled: false, result: null, watchdogId: null };
+    capture = utterance;
     const { id, done } = await mic.start({
-      durationMs: 15000,
+      durationMs,
       label: 'ptt',
-      onAudio: null,
+      onAudio: (chunk) => {
+        if (!capture || capture !== utterance) return;
+        utterance.buffer.push(chunk);
+        if (rmsOf(chunk) > speechRmsThreshold) {
+          utterance.speechSeen = true;
+          utterance.lastLoudAt = now();
+        }
+      },
     });
+    // Silence watchdog: speech followed by sustained silence auto-submits.
+    utterance.watchdogId = setIntervalImpl(() => {
+      if (!capture || capture !== utterance || utterance.settled) return;
+      if (!utterance.speechSeen) return;
+      if (now() - utterance.lastLoudAt < utterance.silenceMs) return;
+      if (!mic.active() || controller.snapshot().state !== 'listening') return;
+      utterance.settled = true;
+      stopWatchdog();
+      submitCapturedUtterance(utterance, 'ptt-silence-submit').catch(() => {});
+    }, 250);
     // Natural expiry (max-duration) without a manual stop must still move
     // state honestly back to armed/disabled — a stuck "listening" is a lie.
     done.then((summary) => {
       const snap = controller.snapshot();
-      if (snap.state !== 'listening') return;
+      if (snap.state !== 'listening' || utterance.settled) return;
+      utterance.settled = true;
+      if (capture === utterance) { stopWatchdog(); capture = null; }
       const target = (listeningEnabled && armedBeforePtt) ? 'armed' : 'disabled';
       try {
         controller.transition(target, { reason: 'ptt-max-duration' });
@@ -141,7 +187,7 @@ export function createAssistantService({
         bytes: summary?.bytes ?? 0,
         peakRms: summary?.peakRms ?? 0,
         avgRms: summary?.avgRms ?? 0,
-        note: 'captured (transcription pending speech recognition) — session expired at max duration',
+        note: 'captured (transcription pending) — session expired at max duration and was NOT submitted',
       });
     }).catch(() => {});
     if (controller.snapshot().state === 'listening') {
@@ -157,8 +203,153 @@ export function createAssistantService({
     return { sessionId: id, done };
   }
 
+  /** Server-side executor hooks (music router + local STT). */
+  function attachExecutor(next) {
+    executor = {
+      transcribe: typeof next?.transcribe === 'function' ? next.transcribe : null,
+      cancelTranscribe: typeof next?.cancelTranscribe === 'function' ? next.cancelTranscribe : null,
+      runText: typeof next?.runText === 'function' ? next.runText : null,
+    };
+    return executor;
+  }
+
+  /**
+   * Submit the current capture: local STT on the RAM-only buffer, then route
+   * the transcript through the existing music command router. The buffer is
+   * never written to disk and is dropped immediately after transcription.
+   */
+  async function submitCapturedUtterance(utterance, reason, summary = null) {
+    const target = (listeningEnabled && armedBeforePtt) ? 'armed' : 'disabled';
+    // The watchdog path still has an active parec child: stop it here first.
+    const micSummary = summary ?? (mic.active() ? mic.stop(reason) : null);
+    const finish = async (out) => {
+      if (capture === utterance) { stopWatchdog(); capture = null; }
+      controller.setMicActive(false, { reason });
+      try { controller.transition(target, { reason: 'ptt-pipeline-done' }); } catch {
+        try { controller.transition('disabled', { reason: 'ptt-pipeline-done' }); } catch { /* error state or already there */ }
+      }
+      utterance.settled = true;
+      utterance.result = out;
+      if (out && out.capture === null && micSummary) out.capture = micSummary;
+      const waiters = utterance.resultWaiters ?? [];
+      utterance.resultWaiters = [];
+      for (const w of waiters) w(out);
+      return out;
+    };
+    try { controller.transition('transcribing', { reason }); } catch {
+      // State moved away (expiry handler / double stop): do not fake progress.
+      return finish({
+        capture: null, transcript: null, handled: false, executed: false,
+        reply: 'Recording ended before transcription could start.', speech: null, error: false, intent: null,
+      });
+    }
+    const bytes = utterance.buffer.length ? Buffer.concat(utterance.buffer) : null;
+    utterance.buffer = []; // drop the raw audio ASAP
+    const effectiveTranscribe = stt?.transcribe ?? executor?.transcribe;
+    const effectiveRunText = runIntent ?? executor?.runText;
+
+    if (!bytes || bytes.length < minUtteranceBytes || !effectiveTranscribe) {
+      const out = {
+        capture: null, transcript: null, handled: false, executed: false, intent: null,
+        reply: !effectiveTranscribe
+          ? 'Captured your request, but speech recognition is not set up yet, so nothing was transcribed.'
+          : "I didn't hear anything I could recognise.",
+        speech: null, error: false,
+      };
+      try { controller.transition('interpreting', { reason: 'ptt-empty-capture' }); } catch {}
+      controller.recordAction({
+        kind: 'ptt', durationMs: 0, bytes: bytes?.length ?? 0,
+        note: !effectiveTranscribe ? 'captured — STT not attached' : 'captured — audio too short, discarded',
+      });
+      return finish(out);
+    }
+
+    // Sanitise the state check before deep transitions.
+    let sttOut = null;
+    let sttFailed = false;
+    try {
+      sttOut = await effectiveTranscribe({ pcm: bytes, sampleRate: 16000 });
+    } catch (error) {
+      sttFailed = true;
+      controller.recordAction({ kind: 'ptt', error: 'stt', note: error?.message?.slice(0, 120) ?? 'stt failed' });
+    }
+    const text = !sttFailed && sttOut?.status === 'ok' && typeof sttOut.text === 'string' ? sttOut.text.trim() : null;
+
+    if (!text) {
+      try { controller.transition('interpreting', { reason: 'ptt-stt-no-speech' }); } catch { /* fallthrough */ }
+      const status = sttOut?.status ?? 'unknown';
+      const reply = sttFailed || status === 'error'
+        ? 'Transcription failed, so I did not catch that request.'
+        : status === 'unavailable'
+          ? 'Local speech recognition is not set up yet, so nothing was transcribed. Run the STT setup step first.'
+          : "I didn't hear anything I could recognise.";
+      controller.recordAction({
+        kind: 'ptt',
+        transcript: null,
+        bytes: micSummary?.bytes ?? 0,
+        note: sttFailed ? 'STT threw' : `STT status ${status}`,
+      });
+      return finish({
+        capture: micSummary, transcript: null, handled: false, executed: false, intent: null,
+        reply, speech: null, error: sttFailed || status === 'error' || status === 'unavailable',
+      });
+    }
+
+    try { controller.transition('interpreting', { reason: 'transcript-ready' }); } catch { /* stay honest */ }
+
+    if (!effectiveRunText) {
+      controller.recordAction({ kind: 'ptt', transcript: text, note: 'captured — no command router attached' });
+      return finish({
+        capture: null, transcript: text, handled: false, executed: false, intent: null,
+        reply: `I heard: “${text}” — but no command router is attached.`, speech: null, error: false,
+      });
+    }
+
+    let out;
+    try { out = await effectiveRunText(text); } catch (error) {
+      const reply = `I heard “${text}” but the command failed.`;
+      controller.recordAction({ kind: 'ptt', transcript: text, error: 'router', note: error?.message?.slice(0, 120) ?? 'router failed' });
+      return finish({
+        capture: null, transcript: text, handled: false, executed: false, intent: null,
+        reply, speech: null, error: true,
+      });
+    }
+    try { controller.transition('executing', { reason: 'intent-executed' }); } catch { /* stay honest */ }
+    controller.recordAction({
+      kind: 'ptt',
+      transcript: text,
+      intent: out?.intent ?? null,
+      reply: out?.reply ?? null,
+      executed: Boolean(out?.executed),
+    });
+    const speech = out?.speech ?? null;
+    if (speech) {
+      try { controller.transition('speaking', { reason: 'assistant-speech' }); } catch { /* stay honest */ }
+    }
+    return finish({
+      capture: null,
+      transcript: text,
+      handled: Boolean(out?.handled),
+      executed: Boolean(out?.executed),
+      intent: out?.intent ?? null,
+      reply: out?.reply ?? null,
+      speech,
+      error: false,
+    });
+  }
+
   async function stopPtt() {
+    // Silence watchdog may already be submitting: attach to the same result.
+    if (capture?.settled && capture?.result) return capture.result;
+    if (capture?.settled) {
+      // Submission in flight — wait for the same promise rather than double-running.
+      return new Promise((resolve) => { capture.resultWaiters = capture.resultWaiters ?? []; capture.resultWaiters.push(resolve); });
+    }
     const summary = mic.stop('ptt-stopped');
+    if (capture) capture.summary = summary;
+    const pending = masterSubmit(capture, 'ptt-stopped', summary);
+    if (pending) return pending;
+    // Legacy path (no transcript pipeline): keep the old honest behaviour.
     controller.setMicActive(false, { reason: 'ptt-stopped' });
     const targetState = (listeningEnabled && armedBeforePtt) ? 'armed' : 'disabled';
     if (controller.snapshot().state !== targetState) {
@@ -173,6 +364,38 @@ export function createAssistantService({
       note: 'captured — transcription arrives with speech recognition setup',
     });
     return summary;
+  }
+
+  function masterSubmit(utterance, reason, summary = null) {
+    if (!utterance || utterance.submitted || !(stt || executor?.transcribe)) return null;
+    utterance.submitted = true;
+    return submitCapturedUtterance(utterance, reason, summary).catch((error) => ({
+      capture: null, transcript: null, handled: false, executed: false, intent: null,
+      reply: `Transcription pipeline failed: ${error?.message?.slice(0, 100) ?? 'unknown error'}`,
+      speech: null, error: true,
+    }));
+  }
+
+  /** Explicit cancel: discard the utterance without transcribing or executing. */
+  async function cancelPtt() {
+    stopWatchdog();
+    if (capture) { capture.settled = true; capture.summary = null; }
+    const summary = mic.stop('ptt-cancelled');
+    if (capture) capture.buffer = [];
+    capture = null;
+    controller.setMicActive(false, { reason: 'ptt-cancelled' });
+    const targetState = (listeningEnabled && armedBeforePtt) ? 'armed' : 'disabled';
+    try {
+      if (controller.snapshot().state !== targetState) {
+        controller.transition(targetState, { reason: 'ptt-cancelled' });
+      }
+    } catch { /* already reset by expiry path */ }
+    controller.recordAction({
+      kind: 'ptt-cancelled',
+      durationMs: summary?.durationMs ?? 0,
+      note: 'utterance discarded — nothing transcribed or executed',
+    });
+    return { cancelled: true, capture: summary };
   }
 
   async function runDiagnostic() {
@@ -245,6 +468,8 @@ export function createAssistantService({
     setListening,
     startPtt,
     stopPtt,
+    cancelPtt,
+    attachExecutor,
     runDiagnostic,
     recordAction,
     dispose,

@@ -8,6 +8,7 @@ import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayloa
 import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 import { parseMusicIntent, runMusicCommand } from '../../core/src/music-commands.mjs';
+import { createSttService } from '../../core/src/stt-service.mjs';
 import { createAssistantService } from './assistant-service.mjs';
 
 const DASHBOARD_ROOT = fileURLToPath(new URL('../../dashboard/', import.meta.url));
@@ -191,6 +192,102 @@ export function createSparkieeServer({
     if (assistantSpeechTimes.length >= assistantSpeechRateMax) return false;
     assistantSpeechTimes.push(now);
     return true;
+  }
+
+  /**
+   * The ONE text→action path. Used by the typed-command endpoint and by the
+   * PTT transcript pipeline: every route runs the same parsing, throttling
+   * policy, voice gate and action ledger, so speech and typing can never
+   * diverge in behaviour.
+   */
+  async function runTextCommand(text) {
+    const intent = parseMusicIntent(text);
+    if (!intent) {
+      return {
+        handled: false,
+        intent: null,
+        reply: 'I did not catch a music command. Try: play, pause, resume, stop, next, previous, volume, shuffle, find, or what is playing.',
+        executed: false,
+        speech: null,
+        playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
+      };
+    }
+
+    let result;
+    try {
+      result = await runMusicCommand(intent, {
+        player: {
+          play: (options) => musicService.play(options),
+          pause: () => musicService.pause(),
+          resume: () => musicService.resume(),
+          stop: () => musicService.stop(),
+          next: () => musicService.next(),
+          previous: () => musicService.previous(),
+          updateSettings: (partial) => musicService.updateSettings(partial),
+          status: () => musicService.playbackStatus(),
+        },
+        searchRanked: (query, options) => musicService.searchRanked(query, options),
+      });
+    } catch (error) {
+      return {
+        handled: true,
+        intent: intent.intent,
+        executed: false,
+        reply: `The ${intent.intent} action failed: ${error?.message?.slice(0, 120) ?? 'unknown error'}`,
+        speech: null,
+        error: true,
+      };
+    }
+
+    // Speak only confirmed, meaningful replies — same gate as the endpoint.
+    let speech = null;
+    if (result.reply && canSpeakAssistant() && assistantSpeechAllowed()) {
+      try {
+        const snapshot = await voiceService.speak(result.reply, { source: 'assistant' });
+        speech = snapshot.speech ?? null;
+        if (speech?.clipId && musicService.duckForSpeech) {
+          const estimateMs = Math.min(7000, 700 + result.reply.length * 65);
+          musicService.duckForSpeech(estimateMs);
+        }
+      } catch {
+        speech = null; // the textual reply remains truthful either way
+      }
+    }
+
+    if (assistantService?.recordAction) {
+      assistantService.recordAction({
+        kind: 'command',
+        text: String(text ?? ''),
+        intent: intent.intent,
+        reply: result.reply ?? null,
+        executed: Boolean(result.executed),
+      });
+    }
+
+    return {
+      handled: true,
+      intent: intent.intent,
+      reply: result.reply,
+      executed: Boolean(result.executed),
+      speech,
+      candidates: result.candidates ?? undefined,
+      matches: result.matches ?? undefined,
+      suggestions: result.suggestions ?? undefined,
+      track: result.track ?? undefined,
+      playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
+    };
+  }
+
+  // Local speech recognition for the transcript pipeline. Created once; the
+  // recogniser subprocess exists only while a transcription runs.
+  let sttService = null;
+  if (assistantService?.attachExecutor) {
+    if (!sttService) sttService = createSttService();
+    assistantService.attachExecutor({
+      transcribe: ({ pcm, sampleRate } = {}) => sttService.transcribe({ pcm, sampleRate }),
+      cancelTranscribe: () => sttService.cancel(),
+      runText: runTextCommand,
+    });
   }
   const server = createServer(async (request, response) => {
     const host = request.socket.localAddress;
@@ -641,82 +738,8 @@ export function createSparkieeServer({
       }
       lastAssistantCommandAt = now;
 
-      const intent = parseMusicIntent(payload.text);
-      if (!intent) {
-        // Unhandled text: answer honestly in JSON without spending TTS.
-        sendJson(response, 200, {
-          ok: true,
-          handled: false,
-          intent: null,
-          reply: 'I did not catch a music command. Try: play, pause, resume, stop, next, previous, volume, shuffle, find, or what is playing.',
-          speech: null,
-          playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
-        });
-        return;
-      }
-
-      let result;
-      try {
-        result = await runMusicCommand(intent, {
-          player: {
-            play: (options) => musicService.play(options),
-            pause: () => musicService.pause(),
-            resume: () => musicService.resume(),
-            stop: () => musicService.stop(),
-            next: () => musicService.next(),
-            previous: () => musicService.previous(),
-            updateSettings: (partial) => musicService.updateSettings(partial),
-            status: () => musicService.playbackStatus(),
-          },
-          searchRanked: (query, options) => musicService.searchRanked(query, options),
-        });
-      } catch (error) {
-        sendJson(response, 500, { error: error?.message ?? 'Assistant command failed.' });
-        return;
-      }
-
-      // Speak only confirmed, meaningful replies — and only inside the voice
-      // preference gate plus the rolling TTS budget. The music ducks while a
-      // real clip plays, then the player restores its own level.
-      let speech = null;
-      if (result.reply && canSpeakAssistant() && assistantSpeechAllowed()) {
-        try {
-          const snapshot = await voiceService.speak(result.reply, { source: 'assistant' });
-          speech = snapshot.speech ?? null;
-          if (speech?.clipId && musicService.duckForSpeech) {
-            const estimateMs = Math.min(7000, 700 + result.reply.length * 65);
-            musicService.duckForSpeech(estimateMs);
-          }
-        } catch {
-          speech = null; // the JSON reply above remains truthful either way
-        }
-      }
-
-      // Keep the assistant's own action ledger honest: every routed text
-      // command is recorded, whether or not it changed playback.
-      if (assistantService?.recordAction) {
-        assistantService.recordAction({
-          kind: 'command',
-          text: String(payload.text ?? ''),
-          intent: intent.intent,
-          reply: result.reply ?? null,
-          executed: Boolean(result.executed),
-        });
-      }
-
-      sendJson(response, 200, {
-        ok: true,
-        handled: true,
-        intent: intent.intent,
-        reply: result.reply,
-        executed: Boolean(result.executed),
-        speech,
-        candidates: result.candidates ?? undefined,
-        matches: result.matches ?? undefined,
-        suggestions: result.suggestions ?? undefined,
-        track: result.track ?? undefined,
-        playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
-      });
+      const result = await runTextCommand(payload.text);
+      sendJson(response, 200, { ok: true, ...result });
       return;
     }
     // -------------------------------------------------------------------------
@@ -815,9 +838,35 @@ export function createSparkieeServer({
         sendJson(response, 503, { error: 'Assistant unavailable.' });
         return;
       }
-      const summary = await assistantService.stopPtt();
+      const result = await assistantService.stopPtt();
       const snap = await assistantService.status();
-      sendJson(response, 200, { ok: true, assistant: snap, capture: summary });
+      // Legacy (no pipeline attached) results are the raw capture summary.
+      const capture = result?.capture ?? null;
+      sendJson(response, 200, {
+        ok: true,
+        assistant: snap,
+        capture: capture ?? result,
+        transcript: result?.transcript ?? null,
+        handled: result?.handled ?? false,
+        executed: result?.executed ?? false,
+        intent: result?.intent ?? null,
+        reply: result?.reply ?? null,
+        speech: result?.speech ?? null,
+      });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/assistant/ptt/cancel') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!assistantService) {
+        sendJson(response, 503, { error: 'Assistant unavailable.' });
+        return;
+      }
+      const result = await assistantService.cancelPtt();
+      const snap = await assistantService.status();
+      sendJson(response, 200, { ok: true, assistant: snap, capture: result?.capture ?? null, cancelled: true });
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/assistant/mic/diagnose') {
