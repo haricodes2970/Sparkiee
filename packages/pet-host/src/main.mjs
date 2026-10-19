@@ -1,4 +1,6 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain, screen } from 'electron';
+import { createShortcutHost } from './shortcut-host.mjs';
+import { hotkeyAction } from '../../core/src/voice-hotkey.mjs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createMovementController } from './movement.mjs';
@@ -266,6 +268,78 @@ async function pollState() {
       visible: true,
     });
   }
+  await syncShortcutFromSettings();
+}
+
+// ---------------------------------------------------------------------------
+// Global push-to-talk shortcut (Ctrl+Alt+Space by default).
+//
+// The pet host owns the Electron globalShortcut registration because the
+// shortcut must work while any application has focus. Registration state is
+// always reported to the daemon — the dashboard must never see a fabricated
+// "active" state when the desktop environment denied the combo.
+// ---------------------------------------------------------------------------
+
+const hotkey = createShortcutHost({ globalShortcut, onPress: () => void handleHotkeyPress() });
+let lastShortcutUpdated = 0;
+
+async function syncShortcutFromSettings() {
+  if (quitting) return;
+  if (Date.now() - lastShortcutUpdated < 4000) return; // keep polls cheap
+  lastShortcutUpdated = Date.now();
+  let settings = null;
+  try {
+    const response = await requestApi('/api/v1/assistant/shortcut');
+    settings = response?.shortcut ?? null;
+  } catch {
+    return; // unreachable runtime: keep the current registration as-is
+  }
+  if (!settings) return;
+  const enabled = settings.enabled === true;
+  const accelerator = settings.accelerator || 'Control+Alt+Space';
+  const already = hotkey.isActive() ? 'registered' : 'not';
+  const changed = (enabled && already !== 'registered')
+    || (!enabled && already === 'registered');
+  if (!changed) return;
+  const result = hotkey.update({ enabled, accelerator });
+  await reportShortcutRegistration(result);
+}
+
+async function reportShortcutRegistration({ registered, detail }) {
+  try {
+    await requestApi('/api/v1/assistant/shortcut/registration', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ registered, detail }),
+    });
+  } catch {
+    // The dashboard will keep the last-known honest value; no pretending.
+  }
+}
+
+/** One hotkey press: inspect the assistant, start or stop capture. */
+async function handleHotkeyPress() {
+  if (quitting) return;
+  try {
+    const status = await requestApi('/api/v1/assistant/status');
+    const action = hotkeyAction(status?.assistant ?? {});
+    if (action === 'start') {
+      await requestApi('/api/v1/assistant/ptt/start', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+    } else if (action === 'stop') {
+      await requestApi('/api/v1/assistant/ptt/stop', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+    }
+    // 'busy' — recogniser or speaker is working; repeated presses do nothing.
+  } catch {
+    // Runtime busy or unreachable: pressing again is the retry; nothing faked.
+  }
 }
 
 async function sendCommand(command) {
@@ -413,6 +487,7 @@ app.on('before-quit', () => {
   quitting = true;
   if (pollTimer) clearInterval(pollTimer);
   movement?.stop();
+  hotkey.dispose();
   ipcMain.removeHandler('pet:command');
   ipcMain.removeHandler('pet:get-state');
   ipcMain.removeHandler('pet:get-pack');

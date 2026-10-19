@@ -144,6 +144,7 @@ export function createSparkieeServer({
   agentEventCooldownMs = AGENT_EVENT_COOLDOWN_MS,
   assistantThrottleMs = 400,
   assistantSpeechRateMax = 8,
+  hotkey = null,
 }) {
   let shutdownRequested = false;
   const commandSpeechSpokeAt = new Map(); // voiceEvent -> timestamp
@@ -722,8 +723,11 @@ export function createSparkieeServer({
     // Assistant state & control: public status, gated commands.
     // -------------------------------------------------------------------------
     if (method === 'GET' && pathname === '/api/v1/assistant/status') {
+      const shortcut = hotkey
+        ? hotkey.snapshot().shortcut
+        : { enabled: true, accelerator: 'Control+Alt+Space', registered: null, registrationDetail: null };
       if (!assistantService) {
-        sendJson(response, 200, { ok: true, assistant: { state: 'disabled', wake: { status: 'needs-setup', missing: ['no-service'] } } });
+        sendJson(response, 200, { ok: true, assistant: { state: 'disabled', wake: { status: 'needs-setup', missing: ['no-service'] }, shortcut } });
         return;
       }
       const snap = await assistantService.status();
@@ -737,7 +741,15 @@ export function createSparkieeServer({
           snap.mic.devices = [];
         }
       }
-      sendJson(response, 200, { ok: true, assistant: snap });
+      sendJson(response, 200, {
+        ok: true,
+        assistant: {
+          ...snap,
+          shortcut: hotkey
+            ? hotkey.snapshot().shortcut
+            : { enabled: true, accelerator: 'Control+Alt+Space', registered: null, registrationDetail: null },
+        },
+      });
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/assistant/listen') {
@@ -820,6 +832,68 @@ export function createSparkieeServer({
       const diag = await assistantService.runDiagnostic();
       const snap = await assistantService.status();
       sendJson(response, 200, { ok: true, assistant: snap, mic: diag });
+      return;
+    }
+    // -------------------------------------------------------------------------
+    // Global hotkey: public state, gated settings save, Electron registration.
+    // -------------------------------------------------------------------------
+    if (method === 'GET' && pathname === '/api/v1/assistant/shortcut') {
+      const shortcut = hotkey
+        ? hotkey.snapshot().shortcut
+        : { enabled: true, accelerator: 'Control+Alt+Space', registered: null, registrationDetail: null };
+      sendJson(response, 200, { ok: true, shortcut });
+      return;
+    }
+    if (method === 'PUT' && pathname === '/api/v1/assistant/shortcut') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      let payload;
+      try { payload = await readJsonBody(request); } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!payload || typeof payload.shortcut !== 'object' || payload.shortcut === null) {
+        sendJson(response, 400, { error: 'Expected { shortcut: { enabled?: boolean, accelerator?: string } }.' });
+        return;
+      }
+      if (!hotkey) {
+        sendJson(response, 503, { error: 'Hotkey settings are unavailable on this runtime.' });
+        return;
+      }
+      try {
+        const snap = await hotkey.save(payload);
+        sendJson(response, 200, { ok: true, shortcut: snap?.shortcut ?? snap });
+      } catch (error) {
+        if (error?.code === 'INVALID_ACCELERATOR') {
+          sendJson(response, 400, { error: error.message });
+          return;
+        }
+        sendJson(response, 500, { error: error?.message ?? 'Failed to save hotkey settings.' });
+      }
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/assistant/shortcut/registration') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!hotkey) {
+        sendJson(response, 503, { error: 'Hotkey state is unavailable on this runtime.' });
+        return;
+      }
+      let payload;
+      try { payload = await readJsonBody(request); } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!payload || typeof payload.registered !== 'boolean') {
+        sendJson(response, 400, { error: 'Expected { registered: boolean, detail?: string }.' });
+        return;
+      }
+      const snap = hotkey.setRegistration(payload);
+      sendJson(response, 200, { ok: true, shortcut: snap?.shortcut ?? snap });
       return;
     }
     // -------------------------------------------------------------------------

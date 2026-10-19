@@ -14,6 +14,7 @@ import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
 import { withoutSecrets } from '../../core/src/env-safety.mjs';
 import { createVoiceService } from './voice-service.mjs';
 import { createAssistantService } from './assistant-service.mjs';
+import { createHotkeyState } from '../../core/src/voice-hotkey.mjs';
 import { createSparkieeServer } from './server.mjs';
 import { createMusicLibrary } from '../../core/src/music-library.mjs';
 import { createMusicPlayer } from '../../core/src/music-player.mjs';
@@ -306,6 +307,8 @@ async function main() {
   musicPlayerRuntime = createMusicPlayer({ library: musicLibrary });
   // Assistant: state machine + mic + wake (Porcupine) + PTT.
   assistantService = createAssistantService();
+  // Global push-to-talk shortcut: persisted settings + Electron registration.
+  const hotkey = createHotkeyState();
   httpServer = createSparkieeServer({
     port,
     token,
@@ -336,6 +339,7 @@ async function main() {
     },
     voiceService,
     assistantService,
+    hotkey,
     refreshVoiceConfig: () => refreshVoiceConfig(),
     isVoiceReady: () => getVoiceConfig().configured === true,
   });

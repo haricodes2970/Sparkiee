@@ -1082,3 +1082,79 @@ test('assistant command records action in service', async () => {
     assert.equal(svc.lastAction.kind, 'command');
   } finally { await close(instance.server); }
 });
+
+// ---------------------------------------------------------------------------
+// Hotkey endpoints: public state, auth-gated save + Electron registration.
+// ---------------------------------------------------------------------------
+
+function hotkeyHubStub() {
+  return {
+    snapshot: () => ({ shortcut: { enabled: true, accelerator: 'Control+Alt+Space', registered: null, registrationDetail: null } }),
+    save: async (partial) => {
+      if (partial.shortcut?.accelerator === 'Control+Alt+Delete') {
+        throw Object.assign(new Error('INVALID_ACCELERATOR: no.'), { code: 'INVALID_ACCELERATOR' });
+      }
+      return { shortcut: { enabled: false, accelerator: 'Control+Alt+Space', registered: null, registrationDetail: null } };
+    },
+    setRegistration: ({ registered, detail }) => ({ shortcut: { enabled: true, accelerator: 'Control+Alt+Space', registered, registrationDetail: detail ?? 'reported' } }),
+  };
+}
+
+test('GET /assistant/shortcut is public and reports registration honestly', async () => {
+  const instance = await startServer({ hotkey: hotkeyHubStub() });
+  try {
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/shortcut`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.shortcut.enabled, true);
+    assert.equal(body.shortcut.accelerator, 'Control+Alt+Space');
+    assert.equal(body.shortcut.registered, null);
+  } finally { await close(instance.server); }
+});
+
+test('PUT /assistant/shortcut saves settings, 400 on non-allowlisted accelerator', async () => {
+  const instance = await startServer({ hotkey: hotkeyHubStub() });
+  try {
+    const h = { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` };
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/shortcut`, { method: 'PUT', headers: h, body: JSON.stringify({ shortcut: { enabled: false } }) });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.shortcut.enabled, false);
+
+    const bad = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/shortcut`, { method: 'PUT', headers: h, body: JSON.stringify({ shortcut: { accelerator: 'Control+Alt+Delete' } }) });
+    assert.equal(bad.status, 400);
+    assert.match((await bad.json()).error, /INVALID_ACCELERATOR|Unsupported accelerator/);
+  } finally { await close(instance.server); }
+});
+
+test('PUT /assistant/shortcut is auth-gated', async () => {
+  const instance = await startServer({ hotkey: hotkeyHubStub() });
+  try {
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/shortcut`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ shortcut: { enabled: false } }) });
+    assert.equal(res.status, 403);
+  } finally { await close(instance.server); }
+});
+
+test('POST /assistant/shortcut/registration records the Electron outcome', async () => {
+  const instance = await startServer({ hotkey: hotkeyHubStub() });
+  try {
+    const h = { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` };
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/shortcut/registration`, { method: 'POST', headers: h, body: JSON.stringify({ registered: false, detail: 'org.freedesktop.portal.GlobalShortcuts denied' }) });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.shortcut.registered, false);
+    assert.match(body.shortcut.registrationDetail, /denied/);
+  } finally { await close(instance.server); }
+});
+
+test('assistant status includes shortcut block', async () => {
+  const instance = await startServer({ hotkey: hotkeyHubStub() });
+  try {
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/status`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.assistant.shortcut.enabled, true);
+    assert.equal(body.assistant.shortcut.accelerator, 'Control+Alt+Space');
+  } finally { await close(instance.server); }
+});
