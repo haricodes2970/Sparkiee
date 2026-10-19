@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { appendFile, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -189,6 +190,15 @@ function launchPetHost(token) {
       stdio: 'ignore',
       detached: false,
     });
+    // Publish the pid immediately: exactly-one-host arbitration in the pet
+    // host compares against this value, and a window between "launching"
+    // and the spawn event could otherwise make an older host self-identify
+    // as the owner. The pid marker file survives between restart attempts
+    // (an orphan must never self-identify as owner just because it sampled
+    // the runtime between two attempts), so it is persisted, not only in
+    // memory, and removed again on clean shutdown.
+    hostTracker.annotateLaunchPid(petHost.pid ?? null);
+    writeFile(paths.hostPidFile, `${petHost.pid}\n`, { mode: 0o600 }).catch(() => {});
     petHost.on('spawn', () => {
       if (petHost?.pid) hostTracker.markRunning(petHost.pid);
       void log(`Desktop pet host running (pid ${petHost?.pid ?? 'unknown'}).`);
@@ -198,10 +208,15 @@ function launchPetHost(token) {
       void log(hostTracker.snapshot().lastError);
     });
     petHost.on('exit', (code, signal) => {
+      // A host that ran stable for 45s earns a fresh restart budget: a
+      // crash long after a healthy run must not be throttled by ancient
+      // single-instance losses.
+      const ranMs = Date.now() - hostTracker.snapshot().since;
+      if (ranMs > 45_000) hostTracker.resetFailures();
       hostTracker.markExited(code, signal, { wasShuttingDown: shuttingDown });
       void log(`Desktop pet host exited (code=${code ?? 'none'}, signal=${signal ?? 'none'}).`);
       petHost = undefined;
-      scheduleHostRestart();
+      scheduleHostRestart(code);
     });
     void log('Desktop pet host launch requested.');
   } catch (error) {
@@ -210,14 +225,19 @@ function launchPetHost(token) {
   }
 }
 
-function scheduleHostRestart() {
+function scheduleHostRestart(exitCode = null) {
   if (shuttingDown || !hostTracker.canLaunch() || !runtimeToken) return;
   if (restartTimer) return;
   if (hostTracker.restarts >= MAX_HOST_RESTARTS) {
     void log(`Desktop pet host restart limit (${MAX_HOST_RESTARTS}) reached. Use the dashboard retry action or restart Sparkiee.`);
     return;
   }
-  const delay = 1_000 * (2 ** hostTracker.restarts);
+  // A clean exit (code 0) is usually single-instance loss: the host noticed
+  // another one owns the desktop. Retrying aggressively then just burns
+  // restart attempts against an orphan that is already about to exit, so a
+  // clean quit waits longer than a crash before retrying.
+  const cleanQuit = exitCode === 0;
+  const delay = cleanQuit ? 6_000 : 1_000 * (2 ** hostTracker.restarts);
   hostTracker.countRestart();
   void log(`Scheduling desktop pet host restart in ${delay}ms (attempt ${hostTracker.restarts}/${MAX_HOST_RESTARTS}).`);
   restartTimer = setTimeout(() => {
@@ -247,6 +267,15 @@ async function restartHost() {
   launchPetHost(runtimeToken);
 }
 
+function lastHostPidFromDisk() {
+  try {
+    const value = Number(readFileSync(paths.hostPidFile, 'utf8').trim());
+    return Number.isInteger(value) && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 async function shutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -255,6 +284,10 @@ async function shutdown(reason) {
     restartTimer = undefined;
   }
   await log(`Shutting down (${reason}).`);
+  await removePidIfOwned();
+  await unlink(paths.hostPidFile).catch((error) => {
+    if (error?.code !== 'ENOENT') log(`Unable to remove pet-host pid file: ${error.message}`);
+  });
   await removePidIfOwned();
   if (musicPlayerRuntime) {
     try {
@@ -314,8 +347,16 @@ async function main() {
     token,
     onShutdown: () => void shutdown('API request'),
     petController,
-    getHostState: () => hostTracker.snapshot(),
+    getHostState: () => {
+      const snap = hostTracker.snapshot();
+      // The last-spawned host pid is authoritative across retry attempts and
+      // phase resets — exactly-one-host arbitration in the pet host reads it.
+      return { ...snap, pid: lastHostPidFromDisk() ?? snap.pid };
+    },
     onRestartHost: () => restartHost(),
+    onWindowEvent: ({ event, pid }) => {
+      void log(`Pet host window ${event}${pid ? ` (host pid ${pid})` : ''}.`);
+    },
     getCharacterInfo: async () => {
       const { packs } = await describeCharacters();
       return packs.find((pack) => pack.id === 'sparkiee-original') ?? packs[0] ?? null;

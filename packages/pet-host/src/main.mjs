@@ -37,6 +37,29 @@ let runtimeReachable = true;
 let closeTransferPendingUntil = 0;
 let quitting = false;
 const hostStartedAt = Date.now();
+/** Continuous daemon-unreachable time after which an unsupervised host exits. */
+const ORPHAN_EXIT_MS = 15_000;
+let runtimeUnreachableAt = null;
+
+// Single-instance ownership at the Electron layer: a second pet host process
+// must never put a second Sparky on the desktop. The lock is a cheap first
+// line; the daemon-backed ownership poll (confirmOwnership below) is the
+// authoritative arbiter that also cleans up hosts orphaned by a crashed
+// daemon.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  // Another pet host already owns the desktop surface. Quit before any
+  // window exists — no duplicate Sparky, no flash.
+  app.exit(0);
+} else {
+  app.on('second-instance', () => {
+    // Command pattern: the live host mirrors presentation ownership.
+    if (desktopWindowVisible(latestState)) {
+      if (!petWindow || petWindow.isDestroyed()) petWindow = createPetWindow();
+      else if (!petWindow.isVisible()) petWindow.showInactive();
+    }
+  });
+}
 
 if (process.platform === 'linux' && process.env.SPARKIEE_OZONE_PLATFORM !== 'wayland') {
   // Phase 0 selected XWayland for GNOME because the pet needs window positioning.
@@ -185,8 +208,14 @@ function reconcileWindowVisibility(state) {
     if (shouldShow && !transferInFlight) petWindow = createPetWindow();
     return;
   }
-  if (shouldShow && !petWindow.isVisible()) petWindow.showInactive();
-  if (!shouldShow && petWindow.isVisible()) petWindow.hide();
+  if (shouldShow && !petWindow.isVisible()) {
+    petWindow.showInactive();
+    windowEvent('shown');
+  }
+  if (!shouldShow && petWindow.isVisible()) {
+    petWindow.hide();
+    windowEvent('hidden');
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -254,11 +283,13 @@ async function deliverPendingSpeech() {
 }
 
 async function pollState() {
+  let reachable = true;
   try {
     publishState(await requestApi('/api/v1/pet/state'));
     runtimeReachable = true;
   } catch {
     runtimeReachable = false;
+    reachable = false;
     publishState({
       ...(latestState || {}),
       animation: 'surprised',
@@ -268,7 +299,72 @@ async function pollState() {
       visible: true,
     });
   }
+  // Exactly-one-host arbitration: the daemon is the single source of truth
+  // about which host pid it spawned. A host that lost (or never had) the
+  // daemon must never keep a window alive.
+  const ownership = await confirmOwnership();
+  if (ownership === 'not-owner') {
+    // The runtime answers but belongs to a newer pet host: this process is
+    // either stale (daemon restarted under the same port) or an orphan from
+    // a killed daemon that raced a new start. Exit quietly so exactly one
+    // Sparky remains: the host the live daemon owns.
+    void windowEvent('orphan-replaced');
+    quitting = true;
+    if (pollTimer) clearInterval(pollTimer);
+    app.exit(0);
+    return;
+  }
+  if (ownership === 'unreachable' || !reachable) {
+    if (runtimeUnreachableAt === null) runtimeUnreachableAt = Date.now();
+    // A daemon that never comes back must not leave a headless host behind
+    // (the window-all-closed no-op keeps this process alive by design). The
+    // daemon restart cycle is seconds; a continuous outage of ORPHAN_EXIT_MS
+    // means nothing is supervising us anymore.
+    if (Date.now() - runtimeUnreachableAt > ORPHAN_EXIT_MS) {
+      void windowEvent('orphan-timeout');
+      quitting = true;
+      if (pollTimer) clearInterval(pollTimer);
+      app.exit(0);
+      return;
+    }
+  } else {
+    runtimeUnreachableAt = null;
+  }
   await syncShortcutFromSettings();
+}
+
+/** Ask the live runtime who actually owns the desktop pet host. */
+async function confirmOwnership() {
+  try {
+    const response = await fetch(apiUrl('/api/v1/runtime'), {
+      signal: AbortSignal.timeout(1200),
+      headers: { accept: 'application/json' },
+    });
+    const runtime = await response.json().catch(() => null);
+    if (!runtime || runtime.name !== 'Sparkiee') return 'unreachable';
+    const hostPid = runtime.petHost?.pid;
+    // pid recorded by the daemon at spawn (the electron browser process pid,
+    // preserved by exec). A mismatch means a newer host is serving the pet.
+    if (Number.isInteger(hostPid) && hostPid !== process.pid) return 'not-owner';
+    return 'owns';
+  } catch {
+    return 'unreachable';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Window lifecycle telemetry: window create/close/show/hide is observable in
+// the daemon log, so "how many Sparkies exist" is never a guess.
+// ---------------------------------------------------------------------------
+
+/** Fire-and-forget diagnostics: window events land in the daemon log. */
+function windowEvent(event) {
+  if (!TOKEN) return;
+  void requestApi('/api/v1/pet/window', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ event, pid: process.pid }),
+  }).catch(() => {}); // diagnostics only — never blocks the window lifecycle
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +493,7 @@ function createPetWindow() {
   });
   pet.setMenu(null);
   pet.setAlwaysOnTop(true);
+  windowEvent('created');
   pet.on('ready-to-show', () => {
     // First paint can land after the first polls: only show immediately if
     // the desktop surface owns presentation (otherwise the reconcile pass
@@ -405,6 +502,7 @@ function createPetWindow() {
   });
   pet.on('closed', () => {
     petWindow = undefined;
+    windowEvent('closed');
     // An ordinary window close (Alt+F4 on the frameless window) is a
     // transfer request, not an app exit: ask for dashboard presentation.
     // If no dashboard tab claims the transfer within the grace period the

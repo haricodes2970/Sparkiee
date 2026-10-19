@@ -15,6 +15,7 @@ export function resolveRuntimePaths(env = process.env) {
   return {
     home,
     pidFile: path.join(home, 'sparkiee.pid'),
+    hostPidFile: path.join(home, 'pet-host.pid'),
     tokenFile: path.join(home, 'runtime.token'),
     logFile: path.join(home, 'daemon.log'),
   };

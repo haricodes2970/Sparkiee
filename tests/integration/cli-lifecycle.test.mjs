@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer as createNetServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -109,6 +109,74 @@ test('CLI gives a useful error when the port is already in use', async () => {
     assert.match(started.stderr, /already in use/);
     const log = await readFile(path.join(env.SPARKIEE_HOME, 'daemon.log'), 'utf8');
     assert.match(log, /EADDRINUSE/);
+  } finally {
+    await new Promise((resolve) => blocker.close(resolve));
+    await rm(scratch, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Stage 1 regression: singleton lifecycle must survive stale pid files, and
+// stop must leave zero sparkiee-owned state behind.
+// ---------------------------------------------------------------------------
+
+/** A pid that is verifiably dead: obtained by letting a real child exit. */
+function takeDeadPid() {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    child.once('close', () => resolve(child.pid));
+  });
+}
+
+test('a stale pid file from a dead daemon is cleared on start and stop leaves no pid file', async () => {
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'sparkiee-stalepid-'));
+  const port = await reservePort();
+  const env = makeEnv(path.join(scratch, 'state'), port);
+  const pidFile = path.join(env.SPARKIEE_HOME, 'sparkiee.pid');
+  try {
+    await mkdir(env.SPARKIEE_HOME, { recursive: true, mode: 0o700 });
+    const deadPid = await takeDeadPid();
+    await writeFile(pidFile, `${deadPid}\n`, { mode: 0o600 });
+
+    const started = await runCli(['start'], env);
+    assert.equal(started.code, 0, `${started.stdout}\n${started.stderr}`);
+    const pid = Number((await readFile(pidFile, 'utf8')).trim());
+    assert.notEqual(pid, deadPid, 'daemon claimed the runtime with a fresh pid');
+
+    const status = await runCli(['status'], env);
+    assert.match(status.stdout, /Sparkiee is running/);
+
+    const stopped = await runCli(['stop'], env);
+    assert.equal(stopped.code, 0, stopped.stderr);
+    assert.match(stopped.stdout, /Sparkiee stopped/);
+    await assert.rejects(() => readFile(pidFile, 'utf8'), /ENOENT/, 'stop removes the pid file');
+  } finally {
+    await runCli(['stop'], env).catch(() => {});
+    await rm(scratch, { recursive: true, force: true });
+  }
+});
+
+test('stop reports honest state for a hung daemon pid instead of spawning a duplicate', async () => {
+  const scratch = await mkdtemp(path.join(os.tmpdir(), 'sparkiee-hung-'));
+  const port = await reservePort();
+  const env = makeEnv(path.join(scratch, 'state'), port);
+  const blocker = createNetServer();
+  blocker.on('connection', (socket) => socket.destroy());
+  try {
+    // Never answers HTTP: owns the port.
+    await new Promise((resolve, reject) => {
+      blocker.once('error', reject);
+      blocker.listen(port, '127.0.0.1', resolve);
+    });
+    const pidFile = path.join(env.SPARKIEE_HOME, 'sparkiee.pid');
+    await mkdir(env.SPARKIEE_HOME, { recursive: true, mode: 0o700 });
+    await writeFile(pidFile, `${process.pid}\n`, { mode: 0o600 });
+
+    const status = await runCli(['status'], env);
+    assert.match(status.stdout, /running but not answering/);
+
+    const stopHit = await runCli(['stop'], env);
+    assert.match(stopHit.stdout, /is not running/);
   } finally {
     await new Promise((resolve) => blocker.close(resolve));
     await rm(scratch, { recursive: true, force: true });

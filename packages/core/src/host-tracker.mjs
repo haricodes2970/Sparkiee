@@ -33,6 +33,10 @@ export function createHostTracker({ disabled = false, noDisplay = false } = {}) 
     canLaunch() {
       return !disabled && !noDisplay;
     },
+    /** Record the spawned child pid while still in 'launching'. */
+    annotateLaunchPid(childPid = null) {
+      if (phase === 'launching') pid = childPid;
+    },
     markLaunching() {
       transition('launching', { childPid: null, error: null });
     },

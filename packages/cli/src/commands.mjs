@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { closeSync, openSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, unlink, stat, open } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
@@ -125,13 +125,16 @@ async function getRuntime(port) {
   return null;
 }
 
-async function waitForStartup({ childPid, port, paths, timeoutMs }) {
+async function waitForStartup({ childPid, port, paths, timeoutMs, logOffset = 0 }) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const runtime = await getRuntime(port);
     if (runtime) return runtime;
 
-    const log = await readLog(paths);
+    // Only this run's fresh log bytes: the log file holds history from
+    // earlier sessions, and a stale "EADDRINUSE" line from yesterday must
+    // never make a healthy startup today look failed.
+    const log = await logFileTailFrom(paths, logOffset);
     if (log.includes(`EADDRINUSE: port ${port}`)) {
       throw new Error(`Port ${port} is already in use on ${DEFAULT_HOST}. Stop the other service or set SPARKIEE_PORT to a free port.`);
     }
@@ -150,6 +153,24 @@ async function waitForStartup({ childPid, port, paths, timeoutMs }) {
   throw new Error(`Sparkiee did not become ready within ${timeoutMs / 1000} seconds. Check ${paths.logFile}.`);
 }
 
+/** Read only the log bytes written after `offset`. Offset out of range → empty. */
+async function logFileTailFrom(paths, offset) {
+  try {
+    const handle = await open(paths.logFile, 'r');
+    try {
+      const { size } = await handle.stat();
+      const begin = Math.max(0, Math.min(offset, size));
+      const buf = Buffer.alloc(size - begin);
+      await handle.read(buf, 0, buf.length, begin);
+      return buf.toString('utf8');
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return '';
+  }
+}
+
 async function start(env) {
   const port = resolvePort(env);
   const timeoutMs = resolveStartTimeoutMs(env);
@@ -164,7 +185,13 @@ async function start(env) {
 
   // Guard against a hung or still-booting daemon that owns the port but does
   // not answer: do not spawn a duplicate that would only fail with EADDRINUSE.
-  const stalePid = Number((await readFile(paths.pidFile, 'utf8').catch(() => '0')).trim());
+  // A pid file whose owner is already gone is stale — remove it here so the
+  // next start cannot be confused by it (stop cleans its own, crashes cannot).
+  let stalePid = Number((await readFile(paths.pidFile, 'utf8').catch(() => '0')).trim());
+  if (Number.isInteger(stalePid) && !isPidAlive(stalePid)) {
+    try { await unlink(paths.pidFile); } catch { /* already gone */ }
+    stalePid = 0;
+  }
   if (isPidAlive(stalePid)) {
     const deadline = Date.now() + 3_000;
     while (Date.now() < deadline) {
@@ -183,6 +210,10 @@ async function start(env) {
 
   // Persist a token before starting the detached daemon so the CLI and daemon share one credential.
   await ensureAuthToken(paths);
+  // Capture the log size before spawning so startup detection only scans
+  // bytes this run produced (see waitForStartup).
+  let logOffset = 0;
+  try { logOffset = (await stat(paths.logFile)).size; } catch { logOffset = 0; }
   const logFd = openSync(paths.logFile, 'a', 0o600);
   let child;
   try {
@@ -198,15 +229,34 @@ async function start(env) {
   child.unref();
   if (!child.pid) throw new Error('Unable to launch the Sparkiee runtime process.');
 
-  const runtime = await waitForStartup({ childPid: child.pid, port, paths, timeoutMs });
+  const runtime = await waitForStartup({ childPid: child.pid, port, paths, timeoutMs, logOffset });
+  // The spawned child and the daemon that answered must be the same process.
+  // Anything else means a second runtime won the port race mid-startup: never
+  // report success for a daemon we did not spawn, and never leave ours behind.
+  if (runtime.pid && runtime.pid !== child.pid) {
+    try { child.kill('SIGTERM'); } catch { /* may already be gone */ }
+    process.stdout.write(`Sparkiee is already running at ${runtime.dashboardUrl} (pid ${runtime.pid}).\n${describeHost(runtime.petHost)}\n`);
+    return;
+  }
   process.stdout.write(`Sparkiee started successfully.\nDashboard: ${runtime.dashboardUrl}\nPID: ${runtime.pid}\n${describeHost(runtime.petHost)}\n`);
 }
 
 async function status(env) {
   const port = resolvePort(env);
+  const paths = resolveRuntimePaths(env);
   const runtime = await getRuntime(port);
   if (!runtime) {
-    process.stdout.write(`Sparkiee is not running at http://${DEFAULT_HOST}:${port}.\n`);
+    // Honest diagnosis, not a bare "not running": a daemon can be alive but
+    // wedged (big event-loop stall) — its pid file and the port tell the truth.
+    const hungPid = Number((await readFile(paths.pidFile, 'utf8').catch(() => '0')).trim());
+    if (Number.isInteger(hungPid) && isPidAlive(hungPid)) {
+      process.stdout.write(
+        `A Sparkiee daemon (pid ${hungPid}) is running but not answering on port ${port}.\n` +
+        `Run "sparkiee stop" to shut it down, or check ${paths.logFile}.\n`,
+      );
+    } else {
+      process.stdout.write(`Sparkiee is not running at http://${DEFAULT_HOST}:${port}.\n`);
+    }
     return;
   }
   process.stdout.write(
@@ -222,6 +272,7 @@ async function stop(env) {
   const paths = resolveRuntimePaths(env);
   const runtime = await getRuntime(port);
   if (!runtime) {
+    await removeStalePidFile(paths);
     process.stdout.write(`Sparkiee is not running at http://${DEFAULT_HOST}:${port}.\n`);
     return;
   }
@@ -236,12 +287,23 @@ async function stop(env) {
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
     if (!(await getRuntime(port))) {
+      await removeStalePidFile(paths);
       process.stdout.write('Sparkiee stopped.\n');
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 80));
   }
   throw new Error(`Shutdown was requested but the runtime is still responding. Inspect ${paths.logFile}.`);
+}
+
+/** Remove the pid file only when its owner is verifiably gone. */
+async function removeStalePidFile(paths) {
+  try {
+    const pid = Number((await readFile(paths.pidFile, 'utf8')).trim());
+    if (Number.isInteger(pid) && pid > 0 && !isPidAlive(pid)) await unlink(paths.pidFile);
+  } catch {
+    // unreadable or missing: nothing to clean
+  }
 }
 
 // ---------------------------------------------------------------------------

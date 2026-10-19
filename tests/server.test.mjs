@@ -1178,3 +1178,36 @@ test('assistant status includes honest stt readiness block', async () => {
     assert.ok(!raw.includes('/pnpm') && !raw.includes('XDG_DATA_HOME'), 'no env details in status');
   } finally { await close(instance.server); }
 });
+
+// ---------------------------------------------------------------------------
+// Window lifecycle telemetry (single-pet diagnostics): token-gated, narrow
+// allowlist of events, no free-form text.
+// ---------------------------------------------------------------------------
+
+test('pet window events require the token and reject unknown events', async () => {
+  const events = [];
+  const instance = await startServer({ onWindowEvent: ({ event, pid }) => events.push({ event, pid }) });
+  try {
+    const unauth = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/window`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'created', pid: process.pid }),
+    });
+    assert.equal(unauth.status, 401);
+
+    const badEvent = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/window`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` },
+      body: JSON.stringify({ event: 'explode', pid: process.pid }),
+    });
+    assert.equal(badEvent.status, 400);
+
+    const ok = await fetch(`http://127.0.0.1:${instance.port}/api/v1/pet/window`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` },
+      body: JSON.stringify({ event: 'created', pid: 424242 }),
+    });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(events, [{ event: 'created', pid: 424242 }]);
+  } finally { await close(instance.server); }
+});

@@ -150,6 +150,7 @@ export function createSparkieeServer({
   assistantSpeechRateMax = 8,
   hotkey = null,
   sttStatus = null,
+  onWindowEvent = null, // ({event, pid}) => void — diagnostics sink
 }) {
   let shutdownRequested = false;
   const commandSpeechSpokeAt = new Map(); // voiceEvent -> timestamp
@@ -389,6 +390,31 @@ export function createSparkieeServer({
     if (method === 'GET' && pathname === '/api/v1/pet/state') {
       if (isAuthorized(request, token)) petController.heartbeat();
       sendJson(response, 200, petController.snapshot());
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/pet/window') {
+      if (!isAuthorized(request, token)) {
+        sendJson(response, 401, { error: 'Unauthorized' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      // {event, pid?} — narrow allowlist, no free-form text beyond 24 chars.
+      const event = typeof payload?.event === 'string' ? payload.event : '';
+      if (!['created', 'closed', 'shown', 'hidden', 'orphan-replaced', 'orphan-timeout'].includes(event)) {
+        sendJson(response, 400, { error: 'event must be a window lifecycle id.' });
+        return;
+      }
+      const pid = Number.isInteger(payload.pid) && payload.pid > 0 ? payload.pid : null;
+      if (typeof onWindowEvent === 'function') {
+        try { onWindowEvent({ event, pid }); } catch { /* diagnostics must not break the route */ }
+      }
+      sendJson(response, 200, { ok: true });
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/pet/command') {
