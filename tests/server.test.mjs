@@ -1158,3 +1158,23 @@ test('assistant status includes shortcut block', async () => {
     assert.equal(body.assistant.shortcut.accelerator, 'Control+Alt+Space');
   } finally { await close(instance.server); }
 });
+
+// ---------------------------------------------------------------------------
+// STT readiness rides on /assistant/status (no paths, no venv internals).
+// ---------------------------------------------------------------------------
+
+test('assistant status includes honest stt readiness block', async () => {
+  const sttStatus = () => ({ provider: 'faster-whisper', status: 'needs-setup', missing: ['stt-venv', 'model'], model: 'tiny.en', sizeBytes: 75000000, origin: 'Systran/faster-whisper-tiny.en', detail: 'Run the explicit setup step.' });
+  const instance = await startServer({ assistantService: assistantEndpointStub(), sttStatus });
+  try {
+    const res = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/status`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.assistant.stt.status, 'needs-setup');
+    assert.equal(body.assistant.stt.model, 'tiny.en');
+    assert.equal(body.assistant.stt.provider, 'faster-whisper');
+    const raw = JSON.stringify(body);
+    assert.ok(!raw.includes('venv/bin/python'), 'no filesystem paths in status');
+    assert.ok(!raw.includes('/pnpm') && !raw.includes('XDG_DATA_HOME'), 'no env details in status');
+  } finally { await close(instance.server); }
+});

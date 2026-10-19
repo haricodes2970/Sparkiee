@@ -1,4 +1,6 @@
 import { createReadStream } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { access, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
@@ -8,7 +10,7 @@ import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayloa
 import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 import { parseMusicIntent, runMusicCommand } from '../../core/src/music-commands.mjs';
-import { createSttService } from '../../core/src/stt-service.mjs';
+import { createSttService, probeSttSetup } from '../../core/src/stt-service.mjs';
 import { createAssistantService } from './assistant-service.mjs';
 
 const DASHBOARD_ROOT = fileURLToPath(new URL('../../dashboard/', import.meta.url));
@@ -17,6 +19,7 @@ const STATIC_FILES = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
   ['/src/main.js', ['src/main.js', 'text/javascript; charset=utf-8']],
+  ['/src/lib/assistant-panel.mjs', ['src/lib/assistant-panel.mjs', 'text/javascript; charset=utf-8']],
   ['/src/styles.css', ['src/styles.css', 'text/css; charset=utf-8']],
 ]);
 // Browser-safe renderer modules the dashboard imports directly from the
@@ -146,6 +149,7 @@ export function createSparkieeServer({
   assistantThrottleMs = 400,
   assistantSpeechRateMax = 8,
   hotkey = null,
+  sttStatus = null,
 }) {
   let shutdownRequested = false;
   const commandSpeechSpokeAt = new Map(); // voiceEvent -> timestamp
@@ -281,6 +285,75 @@ export function createSparkieeServer({
   // Local speech recognition for the transcript pipeline. Created once; the
   // recogniser subprocess exists only while a transcription runs.
   let sttService = null;
+  let systemPython = null; // resolved once, adapter for probeSttSetup
+  let sttStatusCache = null;
+  let sttStatusAt = 0;
+  let sttStatusRefreshing = false;
+  const STT_STATUS_TTL = 10_000;
+
+  function resolveSystemPython() {
+    if (systemPython !== null) return systemPython;
+    systemPython = ''; // sentinel: still resolving
+    execFile('sh', ['-c', 'command -v python3 || command -v python'], { timeout: 3000 }, (error, stdout) => {
+      const found = error || !stdout || !stdout.trim() ? null : stdout.split('\n')[0].trim();
+      systemPython = found ?? null;
+    });
+    return null;
+  }
+
+  async function refreshSttStatus() {
+    sttStatusRefreshing = true;
+    try {
+      resolveSystemPython();
+      const probe = await probeSttSetup({
+        env: process.env,
+        pythonBin: (spec) => {
+          resolveSystemPython();
+          if (spec === 'python3' || spec === 'python') {
+            const resolved = systemPython !== '' ? systemPython : systemPythonFallbackOffDisk();
+            return resolved || null;
+          }
+          return null;
+        },
+        fileExists: (p) => { try { return existsSync(p); } catch { return false; } },
+        runCheck: async ({ venvPython }) => await new Promise((resolve) => {
+          execFile(venvPython, ['-c', 'import faster_whisper'], { timeout: 8000 }, (error) => {
+            resolve(error ? { ok: false } : { ok: true, model: 'tiny.en' });
+          });
+        }),
+      }).catch(() => ({ provider: 'faster-whisper', status: 'unavailable', missing: ['stt-venv', 'model'], model: 'tiny.en' }));
+      // Public shape only: `_paths` stays internal, never serialised to clients.
+      const { _paths, ...publicProbe } = probe;
+      sttStatusCache = publicProbe;
+      sttStatusAt = Date.now();
+      return publicProbe;
+    } finally {
+      sttStatusRefreshing = false;
+    }
+  }
+
+  function systemPythonFallbackOffDisk() {
+    for (const candidate of ['/usr/bin/python3', '/usr/local/bin/python3', '/bin/python3']) {
+      try { if (existsSync(candidate)) return candidate; } catch { /* next */ }
+    }
+    return null;
+  }
+
+  function sttStatusSnapshot() {
+    if (!sttService) return null;
+    if (sttStatusCache && Date.now() - sttStatusAt < STT_STATUS_TTL) return sttStatusCache;
+    if (!sttStatusRefreshing) {
+      void refreshSttStatus().catch(() => {});
+    }
+    return sttStatusCache ?? {
+      provider: 'faster-whisper',
+      status: 'needs-setup',
+      missing: ['stt-venv', 'model'],
+      model: 'tiny.en',
+      detail: 'Local speech recognition status is being checked.',
+    };
+  }
+
   if (assistantService?.attachExecutor) {
     if (!sttService) sttService = createSttService();
     assistantService.attachExecutor({
@@ -754,6 +827,7 @@ export function createSparkieeServer({
         return;
       }
       const snap = await assistantService.status();
+      snap.stt = sttStatus ? sttStatus() : sttStatusSnapshot();
       // Populate mic devices lazily (cached 10s in the service would be ideal;
       // here we just call listDevices and cache briefly on the server).
       if (assistantService._mic && typeof assistantService._mic.listDevices === 'function') {

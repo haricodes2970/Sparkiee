@@ -184,6 +184,23 @@
                 </label>
                 <button type="button" id="test-voice" class="secondary-action">▶ Test spoken voice</button>
                 <div id="voice-feedback" class="voice-feedback" role="status" aria-live="polite"></div>
+
+                <div class="voice-subheading">MICROPHONE &amp; HOTKEY</div>
+                <div class="voice-provider-row">
+                  <span id="assistant-dot" class="footer-dot"></span>
+                  <span id="assistant-state-text">Checking assistant…</span>
+                </div>
+                <div class="voice-provider-row"><span id="assistant-hotkey-text">Hotkey</span></div>
+                <div class="voice-provider-row"><span id="assistant-wake-stt-text">Wake word &amp; speech recognition</span></div>
+                <div class="voice-provider-row"><span id="assistant-mic-text">Microphone</span></div>
+                <div class="voice-provider-row assistant-transcript-row"><span id="assistant-transcript-text" role="status" aria-live="polite"></span></div>
+                <div class="voice-provider-row"><span id="assistant-last-action-text" role="status" aria-live="polite"></span></div>
+                <div class="emote-grid assistant-controls">
+                  <button type="button" id="assistant-ptt" class="emote-button"><span aria-hidden="true">🎙</span> Hold a voice command</button>
+                  <button type="button" id="assistant-cancel-utterance" class="emote-button" disabled><span aria-hidden="true">⨯</span> Cancel</button>
+                  <button type="button" id="assistant-test-mic" class="emote-button"><span aria-hidden="true">♪</span> Test mic</button>
+                </div>
+                <div id="assistant-mic-result" class="voice-feedback" role="status" aria-live="polite"></div>
                 <div class="voice-subheading">SUBTITLES UNDER THE PET</div>
                 <label class="movement-setting" for="captions-enabled">
                   <input type="checkbox" id="captions-enabled" checked />
