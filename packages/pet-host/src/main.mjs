@@ -330,7 +330,28 @@ async function pollState() {
   } else {
     runtimeUnreachableAt = null;
   }
-  await syncShortcutFromSettings();
+  await Promise.allSettled([pollAssistant(), syncShortcutFromSettings()]);
+}
+
+/** Push assistant phase changes to the renderer (mic indicator, ESC cancel). */
+let lastAssistantSerialised = '';
+async function pollAssistant() {
+  let assistant = null;
+  try {
+    assistant = (await requestApi('/api/v1/assistant/status'))?.assistant ?? null;
+  } catch {
+    assistant = null; // unreachable: keep last known phase
+  }
+  const serialised = assistant ? JSON.stringify(assistant) : '';
+  if (serialised === lastAssistantSerialised) return assistant;
+  lastAssistantSerialised = serialised;
+  if (petWindow && !petWindow.isDestroyed()) {
+    // Renderers only ever receive the narrow {state, micActive} view.
+    petWindow.webContents.send('pet:assistant', assistant
+      ? { state: String(assistant.state || ''), micActive: assistant.micActive === true }
+      : null);
+  }
+  return assistant;
 }
 
 /** Ask the live runtime who actually owns the desktop pet host. */
@@ -357,8 +378,7 @@ async function confirmOwnership() {
 // the daemon log, so "how many Sparkies exist" is never a guess.
 // ---------------------------------------------------------------------------
 
-/** Fire-and-forget diagnostics: window events land in the daemon log. */
-function windowEvent(event) {
+/** Fire-and-forget diagnostics: window events land in the daemon log. */function windowEvent(event) {
   if (!TOKEN) return;
   void requestApi('/api/v1/pet/window', {
     method: 'POST',
@@ -413,9 +433,19 @@ async function reportShortcutRegistration({ registered, detail }) {
   }
 }
 
-/** One hotkey press: inspect the assistant, start or stop capture. */
+/**
+ * One hotkey press: inspect the assistant, start or stop capture.
+ * Rapid double-fires (the switch bounce LibreOffice chattering keyboards
+ * happily produce) are folded into a single decision instead of racing two
+ * chat requests against the daemon.
+ */
+let lastPressHandledAt = 0;
+const PRESS_DEBOUNCE_MS = 300;
 async function handleHotkeyPress() {
   if (quitting) return;
+  const pressAt = Date.now();
+  if (pressAt - lastPressHandledAt < PRESS_DEBOUNCE_MS) return;
+  lastPressHandledAt = pressAt;
   try {
     const status = await requestApi('/api/v1/assistant/status');
     const action = hotkeyAction(status?.assistant ?? {});
@@ -533,6 +563,17 @@ ipcMain.handle('pet:send-to-dashboard', async () => {
   if (payload?.pet) publishState(payload.pet);
   return payload?.pet ?? null;
 });
+ipcMain.handle('pet:cancel-utterance', async () => {
+  try {
+    return await requestApi('/api/v1/assistant/ptt/cancel', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+  } catch {
+    return { cancelled: false };
+  }
+});
 ipcMain.on('pet:drag-start', (event, point) => {
   if (!isPointerPoint(point) || !petWindow || event.sender !== petWindow.webContents) return;
   const [windowX, windowY] = petWindow.getPosition();
@@ -593,6 +634,7 @@ app.on('before-quit', () => {
   ipcMain.removeAllListeners('pet:drag-start');
   ipcMain.removeAllListeners('pet:drag-move');
   ipcMain.removeAllListeners('pet:drag-end');
+  ipcMain.removeHandler('pet:cancel-utterance');
 });
 
 // Deliberate or WM-initiated window closure must not kill the host process:

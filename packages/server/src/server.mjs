@@ -11,6 +11,7 @@ import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLi
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 import { parseMusicIntent, runMusicCommand } from '../../core/src/music-commands.mjs';
 import { createSttService, probeSttSetup } from '../../core/src/stt-service.mjs';
+import { hotkeyAction } from '../../core/src/voice-hotkey.mjs';
 import { createAssistantService } from './assistant-service.mjs';
 
 const DASHBOARD_ROOT = fileURLToPath(new URL('../../dashboard/', import.meta.url));
@@ -905,6 +906,38 @@ export function createSparkieeServer({
       }
       const snap = await assistantService.status();
       sendJson(response, 200, { ok: true, assistant: snap });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/assistant/ptt/toggle') {
+      // Desktop-keybinding fallback (GNOME Wayland cannot deliver X grabs
+      // while a Wayland-native app holds focus): the OS fires a command that
+      // toggles capture server-side rather than through the Electron grab.
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!assistantService) {
+        sendJson(response, 503, { error: 'Assistant unavailable.' });
+        return;
+      }
+      const action = hotkeyAction(await assistantService.status());
+      try {
+        if (action === 'start') {
+          await assistantService.startPtt();
+        } else if (action === 'stop') {
+          await assistantService.stopPtt();
+        } else {
+          sendJson(response, 200, { ok: true, action, assistant: await assistantService.status() });
+          return;
+        }
+        sendJson(response, 200, { ok: true, action, assistant: await assistantService.status() });
+      } catch (error) {
+        if (error?.code === 'MIC_BUSY') {
+          sendJson(response, 409, { error: 'The microphone is already in use.' });
+          return;
+        }
+        sendJson(response, 503, { error: error?.message ?? 'Microphone unavailable.' });
+      }
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/assistant/ptt/start') {

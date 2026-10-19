@@ -1,5 +1,6 @@
 import { createAudioEngine } from './lib/audio-engine.mjs';
 import { createCaptionController } from './lib/caption.mjs';
+import { describeMicIndicator } from './lib/mic-indicator.mjs';
 import { createFramePlayer } from './lib/frame-player.mjs';
 import { shouldFallbackChirp, shouldPlayEventChirp, speechCaptionDuration } from './lib/speech-policy.mjs';
 
@@ -232,6 +233,38 @@ function applyPack(pack) {
 }
 window.sparkieePet.onPack(applyPack);
 window.sparkieePet.getPack().then(applyPack).catch(() => {});
+
+// ---------------------------------------------------------------------------
+// Assistant phase stream: the mic indicator bubble beside the pet, and
+// Escape-to-cancel while the microphone is actually active.
+// ---------------------------------------------------------------------------
+
+const micIndicator = document.querySelector('#mic-indicator');
+const micIndicatorLabel = document.querySelector('#mic-indicator-label');
+let assistantPhase = null;
+
+function updateMicIndicator() {
+  if (!micIndicator) return;
+  const info = describeMicIndicator({ assistant: assistantPhase });
+  micIndicator.hidden = !info.visible;
+  micIndicator.dataset.phase = info.phase ?? '';
+  micIndicatorLabel.textContent = info.label ?? '';
+}
+
+window.sparkieePet.onAssistant((assistant) => {
+  assistantPhase = assistant;
+  updateMicIndicator();
+});
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  // Only when capture is genuinely live; a random Escape press must not
+  // cancel unrelated assistant work.
+  if (assistantPhase && (assistantPhase.micActive === true
+    || assistantPhase.state === 'transcribing' || assistantPhase.state === 'interpreting')) {
+    window.sparkieePet.cancelUtterance().catch(() => {});
+  }
+});
+updateMicIndicator();
 
 // ---------------------------------------------------------------------------
 // Drag + click interactions

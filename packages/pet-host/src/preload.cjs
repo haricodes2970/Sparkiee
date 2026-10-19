@@ -146,4 +146,34 @@ contextBridge.exposeInMainWorld('sparkieePet', Object.freeze({
   endDrag() {
     ipcRenderer.send('pet:drag-end');
   },
+  /** Assistant phase stream (state + micActive only; no secrets, no paths). */
+  onAssistant(callback) {
+    if (typeof callback !== 'function') return () => {};
+    const listener = (_event, assistant) => {
+      if (isAssistantPayload(assistant)) callback(sanitizeAssistant(assistant));
+    };
+    ipcRenderer.on('pet:assistant', listener);
+    return () => ipcRenderer.removeListener('pet:assistant', listener);
+  },
+  /**
+   * Escape pressed inside the pet window: discard the utterance in flight.
+   * Only meaningful while capture is active; the server treats a redundant
+   * cancel as a no-op.
+   */
+  async cancelUtterance() {
+    return ipcRenderer.invoke('pet:cancel-utterance');
+  },
 }));
+
+function isAssistantPayload(assistant) {
+  return Boolean(
+    assistant && typeof assistant === 'object' &&
+    typeof assistant.state === 'string' && /^[a-z_]{1,40}$/.test(assistant.state) &&
+    (assistant.micActive === true || assistant.micActive === false)
+  );
+}
+
+function sanitizeAssistant(assistant) {
+  return { state: assistant.state, micActive: assistant.micActive };
+}
+

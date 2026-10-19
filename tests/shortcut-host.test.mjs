@@ -113,3 +113,29 @@ test('shortcut host: activate fires the press callback; dispose unregisters', as
   electron.registered().get('Control+Alt+Space')?.();
   assert.equal(presses, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Stage 2 regression: accelerator bookkeeping must match the desktop state.
+// ---------------------------------------------------------------------------
+
+test('shortcut host: dispose unregisters the CURRENT accelerator, not the default', async () => {
+  const electron = fakeGlobalShortcut();
+  const host = createShortcutHost({ globalShortcut: electron, accelerator: 'Control+Alt+Space', enabled: true });
+  host.start();
+  host.update({ enabled: true, accelerator: 'Control+Alt+Space' });
+  host.dispose();
+  assert.equal(electron.registered().size, 0, 'no stale grab survives dispose');
+  assert.equal(host.isActive(), false);
+});
+
+test('shortcut host: falling back to the current accelerator survives disabled→enabled cycles', async () => {
+  const electron = fakeGlobalShortcut();
+  const host = createShortcutHost({ globalShortcut: electron, accelerator: 'Control+Alt+Space', enabled: true });
+  host.start();
+  host.update({ enabled: false, accelerator: 'Control+Alt+Space' });
+  assert.equal(electron.registered().size, 0, 'disable unregisters');
+  host.update({ enabled: true, accelerator: 'Control+Alt+Space' });
+  assert.equal(electron.registered().size, 1, 're-enable re-registers');
+  host.update({ enabled: true, accelerator: 'Control+Alt+Space' });
+  assert.equal(electron.registered().size, 1, 'still exactly one grab');
+});

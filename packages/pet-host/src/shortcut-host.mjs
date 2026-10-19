@@ -16,12 +16,17 @@ export function createShortcutHost({
 } = {}) {
   let active = false; // a listener is actually registered right now
   let disposed = false;
+  // The accelerator actually live on the desktop. dispose() must unregister
+  // THIS one, not the constructor default — otherwise a settings change can
+  // leave the old combo grabbed by a dead conversation.
+  let currentAccelerator = accelerator;
 
   function register(enabledNow, acceleratorNow) {
     if (active) {
-      try { globalShortcut.unregister(accelerator); } catch { /* best effort */ }
+      try { globalShortcut.unregister(currentAccelerator); } catch { /* best effort */ }
       active = false;
     }
+    currentAccelerator = acceleratorNow;
     if (!enabledNow) {
       onRegistration({ registered: false, detail: 'disabled' });
       return { registered: false, detail: 'disabled' };
@@ -69,7 +74,7 @@ export function createShortcutHost({
     /** Unregister everything — called on before-quit and settings-off. */
     dispose() {
       if (active) {
-        try { globalShortcut.unregister(accelerator); } catch { /* best effort */ }
+        try { globalShortcut.unregister(currentAccelerator); } catch { /* best effort */ }
       }
       active = false;
       disposed = true;

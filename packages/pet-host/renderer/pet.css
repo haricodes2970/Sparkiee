@@ -182,3 +182,47 @@ html, body {
   opacity: 0.55;
 }
 .voice-test:hover { opacity: 1; }
+
+/* --------------------------------------------------------------------------
+   Microphone indicator: a transient bubble beside the pet during
+   listening/transcribing/working/speaking phases only. Never a second pet.
+   -------------------------------------------------------------------------- */
+
+.mic-indicator {
+  position: absolute;
+  top: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(18, 18, 26, 0.92);
+  border: 1px solid rgba(255, 220, 120, 0.5);
+  border-radius: 10px;
+  padding: 4px 10px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: #ffe9a8;
+  white-space: nowrap;
+  z-index: 5;
+}
+
+.mic-indicator-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #7ce38b;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.mic-indicator[data-phase="transcribing"] .mic-indicator-dot,
+.mic-indicator[data-phase="working"] .mic-indicator-dot {
+  background: #ffd166;
+}
+
+.mic-indicator[data-phase="speaking"] .mic-indicator-dot {
+  background: #8093ff;
+}
+
+.mic-indicator[data-phase="error"] .mic-indicator-dot {
+  background: #ff7a6b;
+}

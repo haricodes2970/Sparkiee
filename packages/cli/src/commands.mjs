@@ -27,6 +27,7 @@ import {
   writeVoiceConfig,
 } from '../../core/src/voice-config.mjs';
 import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
+import { createGnomeHotkeyInstaller } from '../../core/src/gnome-hotkey.mjs';
 import { describeSpeechError } from '../../server/src/voice-service.mjs';
 
 const DAEMON_ENTRY = fileURLToPath(new URL('../../server/src/daemon.mjs', import.meta.url));
@@ -73,6 +74,9 @@ Commands:
   start        Start the local runtime and dashboard (default)
   stop         Stop the local runtime
   status       Show whether the local runtime is running
+  ptt toggle   Start or stop a push-to-talk recording (used by the OS keybinding)
+  assistant hotkey install|status|remove
+               Manage the GNOME media-keys fallback binding for the mic shortcut
   voice status Show whether Sparky's spoken voice is configured
   voice setup  Store the ElevenLabs API key (never echoed)
   voice test   Speak a short test phrase on the desktop pet
@@ -476,6 +480,95 @@ async function voiceMute(env, unmute) {
     : 'Sound muted. Subtitles under the pet keep working — that is the design.\n');
 }
 
+// ---------------------------------------------------------------------------
+// Push-to-talk commands.
+//
+// `sparkiee ptt toggle` is the exact command the GNOME media-keys fallback
+// binding runs (Stage 2): it must be short, token-authed (loopback only, key
+// never leaves the state dir), and must never print secrets.
+// ---------------------------------------------------------------------------
+
+async function pttToggle(env) {
+  const port = resolvePort(env);
+  const paths = resolveRuntimePaths(env);
+  const runtime = await getRuntime(port);
+  if (!runtime) throw new Error('Sparkiee is not running. Start it with "sparkiee start".');
+  const token = await readAuthToken(paths);
+  const { response, payload } = await fetchJson(`http://${DEFAULT_HOST}:${port}/api/v1/assistant/ptt/toggle`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: '{}',
+  });
+  if (!response.ok) throw new Error(payload?.error ?? `PTT toggle failed with HTTP ${response.status}.`);
+  // Silent success unless an action needs attention: keybindings run with no
+  // visible terminal, and stdout noise would be pointless.
+  const action = payload?.action ?? 'unknown';
+  if (action === 'busy' || action === 'unknown') {
+    process.stderr.write(`Sparky is ${action === 'busy' ? 'still finishing the last request' : 'unsure what to do'}.\n`);
+  }
+}
+
+/** The fully qualified command line the OS keybinding should run. */
+function resolvePttCommand(env) {
+  if (env.SPARKIEE_PTT_COMMAND) return env.SPARKIEE_PTT_COMMAND;
+  // Absolute: keybindings do not inherit shells. commands.mjs lives at
+  // packages/cli/src; the repo bin is two levels up.
+  const bin = fileURLToPath(new URL('../../../bin/sparkiee.mjs', import.meta.url));
+  return `${process.execPath} ${bin} ptt toggle`;
+}
+
+async function assistantHotkey(env, subcommand, args) {
+  const installer = await createGnomeHotkeyInstaller({ env });
+  switch (subcommand) {
+    case 'install': {
+      let accelerator = 'Control+Alt+Space';
+      const index = args.indexOf('--accelerator');
+      if (index === -1) {
+        if (args.length > 0) throw new Error('Unknown arguments. Usage: sparkiee assistant hotkey install [--accelerator Control+Alt+Space].');
+      } else {
+        accelerator = args[index + 1];
+        if (!accelerator) throw new Error('--accelerator requires a value.');
+      }
+      const command = resolvePttCommand(env);
+      const result = await installer.install({ binding: accelerator, command });
+      process.stdout.write(
+        `GNOME keybinding installed.\nBinding: ${result.binding}\nRuns: ${result.command}\n` +
+        `This binding fires system-wide, including while Wayland-native apps hold focus.\n` +
+        `Remove it with "sparkiee assistant hotkey remove".\n`,
+      );
+      return;
+    }
+    case 'remove': {
+      const result = await installer.remove();
+      process.stdout.write(`GNOME keybinding removed (list now holds ${result.paths.length} custom binding${result.paths.length === 1 ? '' : 's'}).\n`);
+      return;
+    }
+    case 'status': {
+      const status = await installer.status();
+      if (!status.installed) {
+        process.stdout.write(
+          `GNOME keybinding fallback: not installed.\n` +
+          `Install it to make the shortcut reliable while Wayland-native apps hold focus:\n` +
+          `  sparkiee assistant hotkey install\n`,
+        );
+        return;
+      }
+      process.stdout.write(`GNOME keybinding fallback: installed.\nBinding: ${status.binding}\nRuns: ${status.command}\n`);
+      return;
+    }
+    default:
+      throw new Error(`Unknown assistant hotkey command. Try: assistant hotkey install | status | remove.`);
+  }
+}
+
+async function runAssistantCommand(subcommand, args, env) {
+  // `sparkiee assistant hotkey <verb> [args...]`
+  if (subcommand !== 'hotkey') {
+    throw new Error('Unknown assistant command. Try: assistant hotkey install | status | remove.');
+  }
+  await assistantHotkey(env, args[0] ?? 'status', args.slice(1));
+}
+
 async function runVoiceCommand(subcommand, args, env) {
   switch (subcommand) {
     case 'status':
@@ -502,6 +595,14 @@ export async function runCli(argv, env = process.env) {
   const command = argv[0] ?? 'start';
   if (command === 'voice') {
     await runVoiceCommand(argv[1] ?? 'status', argv.slice(2), env);
+    return;
+  }
+  if (command === 'assistant') {
+    await runAssistantCommand(argv[1] ?? 'status', argv.slice(2), env);
+    return;
+  }
+  if (command === 'ptt' && argv[1] === 'toggle') {
+    await pttToggle(env);
     return;
   }
   if (argv.length > 1) throw new Error(`Unexpected arguments: ${argv.slice(1).join(' ')}. Run "sparkiee --help".`);
