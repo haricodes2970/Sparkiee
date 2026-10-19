@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer as createNetServer } from 'node:net';
+import { execFileSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createSparkieeServer } from '../packages/server/src/server.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, isValidAgentEventPayload } from '../packages/core/src/agent-events.mjs';
 import { AGENT_EVENT_REACTIONS, VOICE_LINES } from '../packages/core/src/voice-lines.mjs';
@@ -86,6 +88,55 @@ async function sendAgentEvent(port, payload, { token = TOKEN } = {}) {
 const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
 
 // ---------------------------------------------------------------------------
+// Observer plugin packaging (dependency resolution + entrypoint)
+// ---------------------------------------------------------------------------
+
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
+const PLUGIN_DIR = fileURLToPath(new URL('../packages/plugin-opencode/', import.meta.url));
+
+/** Resolve a bare specifier exactly as OpenCode resolves the local plugin entry. */
+function resolveFromPluginDir(specifier) {
+  const script = `console.log(import.meta.resolve(${JSON.stringify(specifier)}))`;
+  return execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: PLUGIN_DIR,
+    encoding: 'utf8',
+  }).trim();
+}
+
+function versionParts(version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(version).trim());
+  return match ? match.slice(1).map(Number) : null;
+}
+
+/** Minimal semver-range check: caret/tilde floors and exact versions only. */
+function rangeAcceptsVersion(range, version) {
+  const floor = /^(\^|~)?(\d+\.\d+\.\d+)$/.exec(String(range).trim());
+  const actual = versionParts(version);
+  const minimum = floor ? versionParts(floor[2]) : null;
+  if (!floor || !actual || !minimum) return false;
+  const operator = floor[1];
+  const comparison = actual[0] - minimum[0] || actual[1] - minimum[1] || actual[2] - minimum[2];
+  if (comparison < 0) return false;
+  if (operator === '^') return actual[0] === minimum[0];
+  if (operator === '~') return actual[0] === minimum[0] && actual[1] === minimum[1];
+  return comparison === 0;
+}
+
+/** Walk up from a resolved module URL to the package.json that owns it. */
+async function owningManifest(moduleUrl) {
+  let dir = dirname(fileURLToPath(moduleUrl));
+  for (;;) {
+    try {
+      return JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
+    } catch {
+      const parent = dirname(dir);
+      assert.notEqual(parent, dir, `no package.json above ${moduleUrl}`);
+      dir = parent;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Observer mapping (plugin side, pure)
 // ---------------------------------------------------------------------------
 
@@ -135,12 +186,65 @@ test('observer reports facts without content and swallows cooldowns and failures
   assert.deepEqual(await failing(event(9)), { reported: false, reason: 'unreachable' }, 'daemon down never throws');
 });
 
-test('observer package relies on the host-provided module and contains no exit paths', async () => {
+test('observer plugin declares and resolves its @opencode/plugin runtime dependency', async () => {
   const manifest = JSON.parse(await readFile(fileURLToPath(new URL('../packages/plugin-opencode/package.json', import.meta.url)), 'utf8'));
-  assert.deepEqual(manifest.dependencies, undefined, 'OpenCode provides @opencode/plugin; it must not be installed here');
+  const declared = manifest.dependencies?.['@opencode/plugin'];
+  assert.equal(typeof declared, 'string', '@opencode/plugin is a declared runtime dependency');
+  assert.ok(declared.trim().length > 0, 'the declared version is non-empty');
+
+  // Resolution must happen from the plugin's own location — the global OpenCode
+  // config happening to hold a copy is not enough (that was the load failure).
+  const resolvedEntry = resolveFromPluginDir('@opencode/plugin');
+  assert.ok(resolvedEntry.startsWith('file://'), `resolves to a module URL, got ${resolvedEntry}`);
+  assert.ok(
+    resolvedEntry.startsWith(pathToFileURL(REPO_ROOT).href),
+    `resolves inside this workspace, not the global OpenCode config: ${resolvedEntry}`,
+  );
+
+  const resolved = await owningManifest(resolvedEntry);
+  assert.ok(
+    rangeAcceptsVersion(declared, resolved.version),
+    `declared range ${declared} must accept the installed @opencode/plugin ${resolved.version}`,
+  );
+});
+
+test('observer plugin entrypoint imports as a valid OpenCode V2 plugin definition', async () => {
+  // The real entrypoint import is the load path OpenCode uses; if the dependency
+  // is not resolvable from packages/plugin-opencode, this throws.
+  const module = await import(new URL('../packages/plugin-opencode/index.mjs', import.meta.url).href);
+  assert.equal(typeof module.default, 'object', 'default export is a plugin definition');
+  assert.equal(module.default.id, 'sparkiee');
+  assert.equal(typeof module.default.setup, 'function', 'setup() is the V2 entrypoint');
+  assert.equal(module.default.effect, undefined, 'the observer uses the promise API only');
+
+  const subscribed = [];
+  const cleanup = await module.default.setup({
+    event: {
+      subscribe: async function* (options) {
+        subscribed.push(options?.signal);
+        return;
+      },
+    },
+  });
+  assert.equal(typeof cleanup, 'function', 'setup() returns a cleanup that stops the subscription');
+  assert.equal(subscribed.length, 1, 'setup() subscribes to the event stream once');
+  cleanup();
+});
+
+test('observer plugin keeps observer-only safeguards and contains no exit paths', async () => {
   const index = await readFile(fileURLToPath(new URL('../packages/plugin-opencode/index.mjs', import.meta.url)), 'utf8');
-  assert.ok(!index.includes('process.exit'), 'observer never exits OpenCode');
-  assert.ok(!index.includes('ctx.permission'), 'observer never hooks or answers permission prompts');
+  const observer = await readFile(fileURLToPath(new URL('../packages/plugin-opencode/observer.mjs', import.meta.url)), 'utf8');
+  for (const [name, source] of [['index.mjs', index], ['observer.mjs', observer]]) {
+    assert.ok(!source.includes('process.exit'), `${name} never exits OpenCode`);
+    assert.ok(!source.includes('ctx.permission'), `${name} never hooks permission prompts`);
+    assert.ok(!/permission\.(reply|assert)/.test(source), `${name} never approves or rejects permissions`);
+  }
+
+  // No content-bearing event is ever reported; the outgoing payload is proven
+  // field-exact in the reporter test above (only source/sessionId/event leave).
+  for (const type of ['message.part.delta', 'message.part.updated', 'tool.execute.before', 'tool.execute.after', 'session.execution.interrupted', 'permission.replied']) {
+    assert.equal(OPENCODE_EVENT_AGENT_MAP[type], undefined, `${type} is never reported`);
+  }
 });
 
 test('constants honour the spec: idle and interrupts never complete tasks', () => {

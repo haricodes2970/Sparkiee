@@ -131,5 +131,6 @@ Only predefined short lines from `packages/core/src/voice-lines.mjs`
 - `packages/server/src/voice-service.mjs` — orchestration and rate limits.
 - `packages/pet-host/renderer/lib/speech-policy.mjs` — chirp/speech
   coexistence rules.
-- `packages/plugin-opencode/` — observer plugin (host-provided
-  `@opencode/plugin`; it must not be installed inside the package).
+- `packages/plugin-opencode/` — observer plugin (declares and installs its
+  own compatible `@opencode/plugin` runtime dependency; the host does not
+  inject it into local plugin imports).

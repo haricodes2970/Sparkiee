@@ -1,2 +1,8 @@
 packages:
   - "packages/*"
+
+allowBuilds:
+  msgpackr-extract: false
+  protobufjs: false
+
+linkWorkspacePackages: true

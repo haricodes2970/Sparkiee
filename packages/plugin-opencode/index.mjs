@@ -1,12 +1,13 @@
 /**
  * Sparkiee observer plugin for OpenCode.
  *
- * Uses the officially supported plugin API: OpenCode provides the
- * "@opencode/plugin" module at load time (it must not be installed in
- * this package), the subscribe loop runs detached, and every error is
- * contained so OpenCode is never disturbed. The plugin is a pure
- * observer: it reports lifecycle facts to the local Sparkiee daemon and
- * never touches permissions or session state.
+ * Uses the officially supported plugin API. OpenCode resolves the local
+ * plugin's imports from the plugin directory, so this package declares its
+ * own compatible "@opencode/plugin" runtime dependency (installed here and
+ * resolved by the workspace install; it is not injected by the host). The
+ * subscribe loop runs detached, and every error is contained so OpenCode is
+ * never disturbed. The plugin is a pure observer: it reports lifecycle facts
+ * to the local Sparkiee daemon and never touches permissions or session state.
  *
  * Enable it from a repo-level opencode.json:
  *   { "plugins": ["./packages/plugin-opencode"] }

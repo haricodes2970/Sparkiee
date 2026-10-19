@@ -13,5 +13,7 @@
     "index.mjs",
     "observer.mjs"
   ],
-  "comment": "No dependencies: OpenCode provides the '@opencode/plugin' module at load time and rejects copies installed in this package's node_modules."
+  "dependencies": {
+    "@opencode/plugin": "2.0.12"
+  }
 }
