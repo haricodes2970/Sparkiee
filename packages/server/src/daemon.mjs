@@ -11,7 +11,10 @@ import { listCharacterPacks } from '../../core/src/character-pack.mjs';
 import { createPetController } from '../../core/src/pet-state.mjs';
 import { loadVoiceConfig, resolveVoiceCacheDir, DEFAULT_VOICE_ID, DEFAULT_MODEL_ID, DEFAULT_OUTPUT_FORMAT } from '../../core/src/voice-config.mjs';
 import { createAudioCache } from '../../core/src/audio-cache.mjs';
+import { createLocalTts, probeLocalTts } from '../../core/src/local-tts.mjs';
 import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
+import { loadNvidiaConfig, describeNvidiaConfig } from '../../core/src/nvidia-config.mjs';
+import { createNvidiaChatClient } from '../../core/src/chat-client.mjs';
 import { withoutSecrets } from '../../core/src/env-safety.mjs';
 import { createVoiceService } from './voice-service.mjs';
 import { createAssistantService } from './assistant-service.mjs';
@@ -83,6 +86,95 @@ const DEFAULT_UNCONFIGURED = Object.freeze({
 const petController = createPetController();
 let voiceConfigLoaded = null;
 let voiceConfigAt = 0;
+let localTtsStatus = null;
+let localTtsStatusAt = 0;
+const LOCAL_TTS_PROBE_TTL_MS = 30_000;
+
+/**
+ * Local speech fallback availability is probed for real (espeak-ng --version),
+ * never assumed from the presence of the client. The result feeds the honest
+ * speech-ready flag, so a machine with no cloud key but a working espeak-ng
+ * still speaks instead of silently captioning.
+ */
+async function refreshLocalTtsStatus({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && localTtsStatus && now - localTtsStatusAt < LOCAL_TTS_PROBE_TTL_MS) return localTtsStatus;
+  localTtsStatusAt = now;
+  try {
+    localTtsStatus = await probeLocalTts();
+  } catch (error) {
+    localTtsStatus = {
+      provider: 'espeak-ng',
+      status: 'unavailable',
+      binary: null,
+      version: null,
+      detail: `Could not probe the local speech fallback (${error?.message ?? 'unknown error'}).`,
+    };
+  }
+  return localTtsStatus;
+}
+
+function isLocalTtsReady() {
+  return localTtsStatus?.status === 'ready';
+}
+
+// ---------------------------------------------------------------------------
+// NVIDIA conversational configuration: cached like the voice config so the
+// daemon can answer synchronously. The key never leaves this process.
+// ---------------------------------------------------------------------------
+const NVIDIA_CONFIG_TTL_MS = 3000;
+const DEFAULT_NVIDIA_UNCONFIGURED = Object.freeze({
+  configured: false,
+  config: { apiKey: null, model: null, baseUrl: null, localOnly: false },
+  warnings: [],
+  source: null,
+});
+let nvidiaConfigLoaded = null;
+let nvidiaConfigAt = 0;
+
+async function refreshNvidiaConfig({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && nvidiaConfigLoaded && now - nvidiaConfigAt < NVIDIA_CONFIG_TTL_MS) return nvidiaConfigLoaded;
+  nvidiaConfigAt = now;
+  try {
+    nvidiaConfigLoaded = await loadNvidiaConfig();
+  } catch {
+    nvidiaConfigLoaded = { ...DEFAULT_NVIDIA_UNCONFIGURED, warnings: ['NVIDIA configuration could not be read.'] };
+  }
+  return nvidiaConfigLoaded;
+}
+
+function getNvidiaConfig() {
+  return nvidiaConfigLoaded ?? DEFAULT_NVIDIA_UNCONFIGURED;
+}
+
+/**
+ * Replaceable adapter around the chat client: the server only ever sees this
+ * small surface, so the provider can change without touching routing logic.
+ * `configured()` is false in local-only mode, which makes the honest
+ * "local-only" reply path do the work instead of a silent egress.
+ */
+function createChatProvider() {
+  return {
+    configured() {
+      const loaded = getNvidiaConfig();
+      return loaded.configured === true && loaded.config.localOnly !== true;
+    },
+    describe() {
+      const loaded = getNvidiaConfig();
+      return {
+        configured: loaded.configured === true,
+        source: loaded.source,
+        model: loaded.config.model,
+        baseUrl: loaded.config.baseUrl,
+        localOnly: loaded.config.localOnly === true,
+      };
+    },
+    chat(messages, options) {
+      return createNvidiaChatClient({ config: getNvidiaConfig().config }).chat(messages, options);
+    },
+  };
+}
 
 /**
  * Test-only provider override: the official API is the default and the
@@ -115,7 +207,9 @@ async function refreshVoiceConfig({ force = false } = {}) {
       warnings: ['Voice configuration could not be read.'],
     };
   }
-  petController.setVoiceCapability(voiceConfigLoaded.configured === true);
+  // Speech is possible with either a cloud key or a working local
+  // synthesiser: the renderer yields chirps to speech in both cases.
+  petController.setVoiceCapability(voiceConfigLoaded.configured === true || isLocalTtsReady());
   return voiceConfigLoaded;
 }
 
@@ -324,12 +418,22 @@ async function main() {
   await ensureRuntimeHome(paths);
   const token = await readAuthToken(paths);
   await refreshVoiceConfig({ force: true });
+  await refreshLocalTtsStatus({ force: true });
+  await refreshNvidiaConfig({ force: true });
+  // Re-evaluate the speech-ready flag now that the local probe has answered.
+  petController.setVoiceCapability(getVoiceConfig().configured === true || isLocalTtsReady());
   const voiceCache = createAudioCache({ dir: resolveVoiceCacheDir() });
+  // Local speech fallback: captions are not speech, so an espeak-ng clip is
+  // generated whenever no cloud voice is configured (or the cloud fails).
+  // Availability is probed for real and reported honestly.
+  const localTts = isLocalTtsReady() ? createLocalTts() : null;
   const voiceService = createVoiceService({
     getConfig: getVoiceConfig,
     getClient: (config) => createElevenLabsClient({ config, baseUrl: resolveVoiceApiBaseUrl(process.env) }),
     cache: voiceCache,
     petController,
+    localTts,
+    getLocalTtsStatus: () => refreshLocalTtsStatus(),
   });
   // Read-only MP3 library over ~/Music (SPARKIEE_MUSIC_ROOTS overrides).
   // The initial scan runs in the background; status stays honest until it
@@ -380,9 +484,11 @@ async function main() {
     },
     voiceService,
     assistantService,
+    chatProvider: createChatProvider(),
+    refreshChatConfig: () => refreshNvidiaConfig(),
     hotkey,
     refreshVoiceConfig: () => refreshVoiceConfig(),
-    isVoiceReady: () => getVoiceConfig().configured === true,
+    isVoiceReady: () => getVoiceConfig().configured === true || isLocalTtsReady(),
   });
   runtimeToken = token;
 

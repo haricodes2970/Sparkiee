@@ -40,6 +40,8 @@ const assistantDot = document.querySelector('#assistant-dot');
 const assistantStateText = document.querySelector('#assistant-state-text');
 const assistantHotkeyText = document.querySelector('#assistant-hotkey-text');
 const assistantWakeSttText = document.querySelector('#assistant-wake-stt-text');
+const assistantChatText = document.querySelector('#assistant-chat-text');
+const assistantResetChatButton = document.querySelector('#assistant-reset-chat');
 const assistantMicText = document.querySelector('#assistant-mic-text');
 const assistantHearingRow = document.querySelector('#assistant-hearing-row');
 const assistantHearingBar = document.querySelector('#assistant-hearing-bar');
@@ -753,6 +755,30 @@ async function refreshVoiceStatus() {
     } else {
       voiceProviderDot.classList.remove('voice-provider-error');
     }
+    // Local fallback is a separate readiness fact: a caption is not speech, and
+    // "no cloud key" must not read as "Sparky cannot talk".
+    const localReady = voice.localFallback?.available === true;
+    const localName = voice.localFallback?.binary || 'espeak-ng';
+    if (!voice.configured && localReady) {
+      voiceProviderDot.classList.add('voice-provider-ready');
+      voiceProviderText.textContent = `No cloud key — speaking with the local fallback (${localName}).`;
+      voiceStat.textContent = 'Local voice ready';
+      voiceStatCaption.textContent = `Local fallback: ${localName}`;
+      overviewVoiceState.textContent = `Local voice ready (${localName}) — no cloud key needed.`;
+    } else if (voice.configured && localReady) {
+      voiceProviderText.textContent += ` · local fallback ${localName} ready`;
+    } else if (!voice.configured && !localReady && !voice.lastError) {
+      voiceProviderText.textContent = 'Not configured — install espeak-ng for local speech, or run “sparkiee voice setup”.';
+    }
+    // Honest playback evidence: bytes synthesised is not audio the user heard.
+    const playback = voice.lastPlayback;
+    if (playback && playback.status === 'failed') {
+      voiceProviderDot.classList.remove('voice-provider-ready');
+      voiceProviderDot.classList.add('voice-provider-error');
+      voiceStat.textContent = 'Playback failed';
+      voiceStatCaption.textContent = `The last clip did not play (${playback.detail ?? 'unknown'}).`;
+      overviewVoiceState.textContent = 'Last spoken clip did not play — check the audio output device.';
+    }
     if (Array.isArray(payload.warnings) && payload.warnings.length > 0 && !voiceFeedback.dataset.locked) {
       voiceFeedback.textContent = payload.warnings[0];
     }
@@ -785,6 +811,11 @@ function applyAssistantState(vm) {
   assistantStateText.textContent = vm.stateLabel;
   assistantHotkeyText.textContent = `Hotkey — ${vm.hotkeyLabel}`;
   assistantWakeSttText.textContent = `Wake word: ${vm.wakeLabel} · Speech recognition: ${vm.sttLabel}`;
+  if (assistantChatText) {
+    const history = vm.conversationHistory > 0 ? ` · ${vm.conversationHistory} message(s) remembered` : '';
+    const error = vm.chatError ? ` · last error: ${vm.chatError}` : '';
+    assistantChatText.textContent = `Chat assistant: ${vm.conversationLabel}${history}${error}`;
+  }
   assistantMicText.textContent = `Microphone — ${vm.micLabel}`;
   // Hearing meter: pixel-styled bars driven by the backend's real 0..1 level.
   // Only visible while the assistant is genuinely hearing (capture live + state).
@@ -829,6 +860,7 @@ async function refreshAssistant() {
     assistantStateText.textContent = 'Status unavailable';
     assistantHotkeyText.textContent = 'Hotkey — unknown';
     assistantWakeSttText.textContent = 'Wake word: unknown · Speech recognition: unknown';
+    if (assistantChatText) assistantChatText.textContent = 'Chat assistant: unknown';
     assistantMicText.textContent = 'Microphone — unknown';
     assistantLastActionText.textContent = 'Assistant status unavailable — is the runtime up?';
     assistantLastTranscript = '';
@@ -907,6 +939,28 @@ async function sendAssistantTestMic() {
 assistantPttButton.addEventListener('click', () => { void sendAssistantToggle(); });
 assistantCancelButton.addEventListener('click', () => { void sendAssistantCancel(); });
 assistantTestMicButton.addEventListener('click', () => { void sendAssistantTestMic(); });
+if (assistantResetChatButton) {
+  assistantResetChatButton.addEventListener('click', () => { void sendAssistantResetConversation(); });
+}
+
+async function sendAssistantResetConversation() {
+  assistantResetChatButton.disabled = true;
+  try {
+    const response = await fetch('/api/v1/assistant/conversation/reset', {
+      method: 'POST',
+      headers: { accept: 'application/json' },
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    assistantMicResult.textContent = `Conversation reset — ${result.cleared ?? 0} stored message(s) forgotten.`;
+  } catch (error) {
+    assistantMicResult.textContent = `Could not reset the conversation: ${error.message}`;
+  } finally {
+    assistantResetChatButton.disabled = false;
+    void refreshAssistant();
+  }
+}
 
 
 speechEnabledToggle.addEventListener('change', () => {

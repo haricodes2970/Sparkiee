@@ -20,6 +20,7 @@ let lastVoiceAt = null;
 let lastAnimation = null;
 let lastSpeechId = 0;
 let speechElement = null;
+let speechReporter = null; // reports the real outcome of the clip now playing
 let speechCaptionUntil = 0;
 let eventChirpSuppressedAt = 0;
 
@@ -78,7 +79,7 @@ async function reactWithVoice(eventId, captionTextValue) {
 // back to a chirp only where speech failed. Muted mode keeps captions.
 // ---------------------------------------------------------------------------
 
-function stopSpeechAudio() {
+function releaseSpeechAudio() {
   if (!speechElement) return;
   try {
     speechElement.pause();
@@ -89,32 +90,106 @@ function stopSpeechAudio() {
   speechElement = null;
 }
 
-function playSpeechClip(dataUrl) {
-  stopSpeechAudio();
+/**
+ * Stop whatever clip is playing. A clip cut short is reported honestly: the
+ * user did not hear the whole phrase, so the daemon must not assume it did.
+ */
+function stopSpeechAudio() {
+  const report = speechReporter;
+  speechReporter = null;
+  releaseSpeechAudio();
+  if (report) report('skipped', 'stopped-early');
+}
+
+/**
+ * Tell the daemon what actually happened to the announced clip. This is the
+ * only honest playback evidence the app can produce: synthesis success is not
+ * playback success. Best-effort — a missing bridge never breaks the pet.
+ */
+function reportSpeech(id, status, detail = null) {
+  try {
+    window.sparkieePet?.reportSpeech?.({ id, status, detail });
+  } catch {
+    // Telemetry only.
+  }
+}
+
+/**
+ * Play a generated clip and report what really happened to it.
+ *
+ * Two promises, because they answer two different questions:
+ *  - `captionDone` resolves with the clip duration once playback has really
+ *    started (so the subtitle matches the real speech length), or null when it
+ *    never starts.
+ *  - `result` resolves when playback has actually finished — which is the only
+ *    moment the microphone may open. Reporting at the *start* of a clip would
+ *    let the mic transcribe Sparky's own voice.
+ *
+ * Every failure carries the real reason (NotAllowedError, media-error,
+ * not-loaded, stopped-early) instead of a generic "playback failed".
+ */
+function playSpeechClip(dataUrl, id) {
+  releaseSpeechAudio();
   const element = new Audio(dataUrl);
   const volume = currentState?.settings?.audio?.volume;
   element.volume = Number.isFinite(volume) ? Math.min(1, Math.max(0, volume)) : 0.7;
   speechElement = element;
   // Spoken words must not be drowned out by a chirp that is still ringing.
   audio.stopAll();
-  return new Promise((resolve) => {
+
+  let playFailure = null; // DOMException name, when the browser refuses play()
+  let reported = false;
+  const report = (status, detail) => {
+    if (reported) return;
+    reported = true;
+    if (speechReporter === report) speechReporter = null;
+    reportSpeech(id, status, detail);
+  };
+  speechReporter = report;
+
+  let settleResult = () => {};
+  const result = new Promise((resolve) => {
+    let settled = false;
+    settleResult = (status, detail) => {
+      if (settled) return;
+      settled = true;
+      if (speechElement === element) releaseSpeechAudio();
+      report(status, detail);
+      resolve({ status, detail });
+    };
+    element.addEventListener('ended', () => settleResult('played', `${Math.round((element.duration || 0) * 1000)}ms`), { once: true });
+    element.addEventListener('error', () => settleResult('failed', playFailure || 'media-error'), { once: true });
+  });
+
+  let settleCaption = () => {};
+  const captionDone = new Promise((resolve) => {
     let settled = false;
     let watchdog = null;
-    const finish = (value) => {
+    const usableDuration = () => (Number.isFinite(element.duration) && element.duration > 0 ? element.duration : null);
+    settleCaption = (value) => {
       if (settled) return;
       settled = true;
       if (watchdog !== null) clearTimeout(watchdog);
       resolve(value);
     };
-    element.addEventListener(
-      'loadedmetadata',
-      () => finish(Number.isFinite(element.duration) ? element.duration : null),
-      { once: true },
-    );
-    element.addEventListener('error', () => finish(null), { once: true });
-    watchdog = setTimeout(() => finish(Number.isFinite(element.duration) ? element.duration : null), 900);
-    element.play().catch(() => finish(null));
+    element.addEventListener('loadedmetadata', () => settleCaption(usableDuration()), { once: true });
+    element.addEventListener('playing', () => settleCaption(usableDuration()), { once: true });
+    element.addEventListener('error', () => settleCaption(null), { once: true });
+    watchdog = setTimeout(() => {
+      const duration = usableDuration();
+      settleCaption(duration);
+      // Never started in time: fail loudly rather than let silence pass as
+      // speech. Releasing the element also prevents surprise late audio.
+      if (duration === null) settleResult('failed', 'not-loaded');
+    }, 3000);
+    element.play().catch((error) => {
+      playFailure = error?.name || 'play-failed';
+      settleCaption(null);
+      settleResult('failed', playFailure);
+    });
   });
+
+  return { captionDone, result };
 }
 
 async function fallbackChirpFor(speech) {
@@ -141,24 +216,37 @@ async function handleSpeech(speech) {
 
   const audioSettings = currentState?.settings?.audio ?? {};
   const muted = audioSettings.enabled === false;
-  let played = false;
-  if (speech.dataUrl && !muted) {
-    const durationSeconds = await playSpeechClip(speech.dataUrl);
-    played = durationSeconds !== null;
-    if (played) {
-      const ms = speechCaptionDuration({ audioDurationSeconds: durationSeconds, configuredMs });
-      // ...and then tracks the real speech length (same text: timer only,
-      // no flicker).
-      showCaption(text, { ms });
-      speechCaptionUntil = Date.now() + ms;
-      return;
-    }
-    stopSpeechAudio(); // release the element that failed to play
+  if (muted) {
+    // Never play when muted — and say so, so the daemon does not mistake a
+    // muted caption for audible speech.
+    reportSpeech(speech.id, 'muted', 'audio-disabled');
+    return;
   }
-  // Honest fallback: speech failed (generation or playback), so the chirp
-  // returns where it was suppressed, or for an explicit test click.
-  const failure = played ? null : { ...speech, error: speech.error || 'playback_failed' };
-  if (failure && shouldFallbackChirp(failure, { suppressedAt: eventChirpSuppressedAt, now: Date.now() })) {
+  if (!speech.dataUrl) {
+    // No audio exists at all (generation failed): report the real code.
+    reportSpeech(speech.id, 'failed', speech.error || 'no_clip');
+    if (shouldFallbackChirp({ ...speech, error: speech.error || 'no_clip' }, { suppressedAt: eventChirpSuppressedAt, now: Date.now() })) {
+      await fallbackChirpFor(speech);
+    }
+    return;
+  }
+  const playback = playSpeechClip(speech.dataUrl, speech.id);
+  const durationSeconds = await playback.captionDone;
+  if (durationSeconds !== null) {
+    // The subtitle tracks the real speech length (same text: timer only, no
+    // flicker). The playback report is delivered by playSpeechClip itself, at
+    // the moment the clip really ends.
+    const ms = speechCaptionDuration({ audioDurationSeconds: durationSeconds, configuredMs });
+    showCaption(text, { ms });
+    speechCaptionUntil = Date.now() + ms;
+    return;
+  }
+  // Playback never started (or was refused): the real reason is already
+  // reported. Read it so the fallback is honest about what went wrong.
+  const outcome = await playback.result;
+  // Honest fallback: playback failed, so the chirp returns where it was
+  // suppressed, or for an explicit test click.
+  if (shouldFallbackChirp({ ...speech, error: speech.error || outcome.detail || 'playback_failed' }, { suppressedAt: eventChirpSuppressedAt, now: Date.now() })) {
     await fallbackChirpFor(speech);
   }
 }
@@ -173,8 +261,11 @@ function applyState(state) {
   statusText.textContent = String(state.label || 'Hanging out').toLowerCase().slice(0, 40);
   connectionDot.classList.toggle('disconnected', state.hostConnected !== true);
   document.querySelector('#pet-name').textContent = String(state.characterName || 'sparkiee').slice(0, 32).toLowerCase();
-  if (state.visible === false) root.dataset.hidden = 'true';
-  else delete root.dataset.hidden;
+  if (state.visible === false) {
+    root.dataset.hidden = 'true';
+    // Hidden pet must not keep talking: stop any clip mid-phrase.
+    stopSpeechAudio();
+  } else delete root.dataset.hidden;
 
   if (state.settings?.audio) audio.setSettings(state.settings.audio);
 

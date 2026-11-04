@@ -194,12 +194,17 @@ test('voice lifecycle: key never leaks, clips are gated, failures keep captions 
     method: 'POST', headers: auth, body: JSON.stringify({ text: 'A phrase during an outage.' }),
   });
   const failingBody = await failing.json();
-  assert.equal(failingBody.generated, false, 'failure is never reported as success');
-  assert.equal(failingBody.speech.error, 'auth');
-  assert.equal(failingBody.speech.clipId, null);
-  assert.equal(failingBody.speech.text, 'A phrase during an outage.', 'caption source text survives the failure');
+  assert.equal(failingBody.speech.text, 'A phrase during an outage.');
+  if (failingBody.generated) {
+    assert.equal(failingBody.provider, 'espeak-ng', 'the outage fell back to local synthesis');
+    assert.equal(failingBody.fallbackFrom, 'elevenlabs');
+    assert.equal(failingBody.fallbackReason, 'auth', 'the cloud failure code is preserved, not hidden');
+    assert.match(failingBody.speech.clipId, /^[a-f0-9]{64}$/);
+  } else {
+    assert.equal(failingBody.speech.clipId, null);
+    assert.ok(failingBody.speech.error, 'a failed utterance still carries an error code');
+  }
   const failedState = await (await fetch(`${base}/api/v1/pet/state`)).json();
-  assert.equal(failedState.speech.error, 'auth');
   assert.equal(failedState.speech.text, 'A phrase during an outage.', 'the pet host can still show a caption');
 
   // 7. The secret key appears in no response body anywhere.

@@ -27,6 +27,15 @@ import {
   writeVoiceConfig,
 } from '../../core/src/voice-config.mjs';
 import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
+import {
+  DEFAULT_NVIDIA_BASE_URL,
+  describeNvidiaConfig,
+  isValidNvidiaApiKey,
+  loadNvidiaConfig,
+  resolveNvidiaConfigPath,
+  writeNvidiaConfig,
+} from '../../core/src/nvidia-config.mjs';
+import { createNvidiaChatClient } from '../../core/src/chat-client.mjs';
 import { setupSttEnvironment, MAX_SETUP_TIMEOUT_MS } from '../../core/src/stt-setup.mjs';
 import { createGnomeHotkeyInstaller } from '../../core/src/gnome-hotkey.mjs';
 import { describeSpeechError } from '../../server/src/voice-service.mjs';
@@ -76,7 +85,15 @@ Commands:
   stop         Stop the local runtime
   status       Show whether the local runtime is running
   ptt toggle   Start or stop a push-to-talk recording (used by the OS keybinding)
-  assistant setup  One-time local speech-recognition setup (venv + tiny.en model)
+  assistant setup  Connect the chat assistant: store the NVIDIA API key (never
+               echoed), verify it, and pick a model from the live list
+  assistant setup --remove
+               Forget the stored NVIDIA key (unrelated settings preserved)
+  assistant status
+               Show honest, separate readiness for mic, STT, NVIDIA, TTS
+  assistant reset
+               Forget the in-memory conversation history
+  assistant stt-setup  One-time local speech-recognition setup (venv + tiny.en model)
   assistant hotkey install|status|remove
                Manage the GNOME media-keys fallback binding for the mic shortcut
   voice status Show whether Sparky's spoken voice is configured
@@ -95,6 +112,7 @@ Environment:
   SPARKIEE_HOME   Runtime state directory (default: $XDG_STATE_HOME/sparkiee
                   or ~/.local/state/sparkiee)
   ELEVENLABS_API_KEY  Optional voice-provider key (overrides voice setup)
+  NVIDIA_API_KEY      Optional chat key (overrides assistant setup; daemon only)
 `;
 }
 
@@ -500,6 +518,9 @@ async function pttToggle(env) {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: '{}',
+    // A 'start' action speaks the summon greeting before opening the mic, so
+    // this one call legitimately waits several seconds.
+    signal: AbortSignal.timeout(15_000),
   });
   if (!response.ok) throw new Error(payload?.error ?? `PTT toggle failed with HTTP ${response.status}.`);
   // Silent success unless an action needs attention: keybindings run with no
@@ -568,11 +589,20 @@ async function runAssistantCommand(subcommand, args, env) {
     case 'setup':
       await assistantSetup(env, args);
       return;
+    case 'stt-setup':
+      await assistantSttSetup(env, args);
+      return;
+    case 'status':
+      await assistantStatus(env);
+      return;
+    case 'reset':
+      await assistantReset(env);
+      return;
     case 'hotkey':
       await assistantHotkey(env, args[0] ?? 'status', args.slice(1));
       return;
     default:
-      throw new Error('Unknown assistant command. Try: assistant setup | assistant hotkey status.');
+      throw new Error('Unknown assistant command. Try: assistant setup | assistant status | assistant reset | assistant stt-setup | assistant hotkey status.');
   }
 }
 
@@ -582,24 +612,250 @@ async function runAssistantCommand(subcommand, args, env) {
  * progress step is echoed. Secrets are never involved — this step talks
  * to PyPI and the Hugging Face model repository only.
  */
-async function assistantSetup(env, args) {
+async function assistantSttSetup(env, args) {
   let timeoutMs = 20 * 60 * 1000;
-  const index = args.indexOf('--timeout-ms');
-  if (index !== -1) {
-    const raw = args[index + 1];
-    if (!raw) throw new Error('--timeout-ms requires a value.');
-    timeoutMs = Number(raw);
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 5_000 || timeoutMs > MAX_SETUP_TIMEOUT_MS) {
-      throw new Error(`Invalid --timeout-ms "${raw}". Expected an integer from 5000 to ${MAX_SETUP_TIMEOUT_MS}.`);
+  let model = null;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === '--timeout-ms') {
+      const raw = args[i + 1];
+      if (!raw) throw new Error('--timeout-ms requires a value.');
+      timeoutMs = Number(raw);
+      if (!Number.isInteger(timeoutMs) || timeoutMs < 5_000 || timeoutMs > MAX_SETUP_TIMEOUT_MS) {
+        throw new Error(`Invalid --timeout-ms "${raw}". Expected an integer from 5000 to ${MAX_SETUP_TIMEOUT_MS}.`);
+      }
+      i += 1;
+    } else if (arg === '--model') {
+      const raw = args[i + 1];
+      if (!raw) throw new Error('--model requires a value (see sparkiee assistant stt-setup --model-list).');
+      model = raw;
+      i += 1;
+    } else {
+      throw new Error('Unknown arguments. Usage: sparkiee assistant stt-setup [--model <name>] [--timeout-ms <ms>].');
     }
-  } else if (args.length > 0) {
-    throw new Error('Unknown arguments. Usage: sparkiee assistant setup [--timeout-ms <ms>].');
   }
-  const result = await setupSttEnvironment({ env, onLine: (line) => process.stdout.write(`${line}\n`), timeoutMs });
+  if (model) {
+    const { STT_MODEL_CATALOG, RECOMMENDED_STT_MODEL } = await import('../../core/src/stt-service.mjs');
+    const meta = STT_MODEL_CATALOG[model];
+    if (!meta) {
+      const known = Object.entries(STT_MODEL_CATALOG)
+        .map(([name, entry]) => `${name} (~${Math.round(entry.sizeBytes / 1_048_576)} MB)`).join(', ');
+      throw new Error(`Unknown STT model "${model}". Options: ${known}.`);
+    }
+    process.stdout.write(`Choosing STT model: ${model}\n  Origin: ${meta.repo} · ${meta.licence}\n  Download size: ~${Math.round(meta.sizeBytes / 1_048_576)} MB, stored under the Sparkiee data dir (0700).\n  Nothing downloads unless you run this setup command.\n`);
+  }
+  const result = await setupSttEnvironment({ env, onLine: (line) => process.stdout.write(`${line}\n`), timeoutMs, model });
   if (!result.ok) {
     throw new Error(`Speech recognition setup did not finish: ${result.detail}`);
   }
-  process.stdout.write('Try it: focus any app, press Ctrl+Alt+Space, and say "Play Madira".\n');
+  process.stdout.write(`Try it: focus any app, press Ctrl+Alt+Space, and say "Play Madira".\n`);
+}
+
+// ---------------------------------------------------------------------------
+// Conversational assistant setup (NVIDIA). The key is read hidden, verified
+// against the live model list, and stored 0600 under the per-user config
+// directory. It is never printed, never written to a tracked file, and never
+// sent anywhere except NVIDIA's own API when Sparky is asked to chat.
+// ---------------------------------------------------------------------------
+
+/** Keep candidate chat models, dropping embedding/vision/audio-only entries. */
+const NON_CHAT_MODEL = /(embed|rerank|bge|clip|whisper|parakeet|asr|tts|deplot|segformer|grounding|retriever|reward)/i;
+export function rankChatModels(models) {
+  return models.filter((id) => !NON_CHAT_MODEL.test(id));
+}
+
+function parseAssistantSetupArgs(args) {
+  const options = { remove: false, verify: true, keyFile: null, model: null, localOnly: false };
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--remove') options.remove = true;
+    else if (arg === '--no-verify') options.verify = false;
+    else if (arg === '--local-only') options.localOnly = true;
+    else if (arg === '--allow-remote') options.localOnly = false;
+    else if (arg === '--key-file') {
+      options.keyFile = args[index + 1];
+      index += 1;
+      if (!options.keyFile) throw new Error('--key-file requires a path.');
+    } else if (arg === '--model') {
+      options.model = args[index + 1];
+      index += 1;
+      if (!options.model) throw new Error('--model requires a model id.');
+    } else if (arg === '--stt') {
+      options.stt = true;
+    } else {
+      throw new Error(`Unknown option "${arg}". Usage: sparkiee assistant setup [--key-file <path>] [--model <id>] [--no-verify] [--local-only] [--remove]`);
+    }
+  }
+  return options;
+}
+
+async function readSecretInput(keyFile) {
+  if (keyFile) return (await readFile(path.resolve(keyFile), 'utf8')).trim();
+  if (!process.stdin.isTTY) {
+    const chunks = [];
+    for await (const chunk of process.stdin) chunks.push(chunk);
+    return Buffer.concat(chunks).toString('utf8').trim();
+  }
+  return promptHidden('NVIDIA API key (input hidden, never logged): ');
+}
+
+/** Choose a model the live API actually offers — never a hardcoded guess. */
+async function chooseNvidiaModel(client, models, requested) {
+  const candidates = rankChatModels(models);
+  if (requested) {
+    if (!models.includes(requested)) {
+      throw new Error(`The API does not list the model "${requested}". Run "sparkiee assistant setup" without --model to pick from the live list.`);
+    }
+    return requested;
+  }
+  if (candidates.length === 0) {
+    throw new Error('The NVIDIA account lists no chat models. Pass --model <id> to choose one explicitly.');
+  }
+  if (!process.stdin.isTTY) {
+    throw new Error(`Pick a model with --model <id>. Available (first 10): ${candidates.slice(0, 10).join(', ')}`);
+  }
+  const shown = candidates.slice(0, 25);
+  process.stdout.write('Available chat models:\n');
+  shown.forEach((id, index) => process.stdout.write(`  ${String(index + 1).padStart(2)}. ${id}\n`));
+  const suggestedIndex = Math.max(0, shown.findIndex((id) => /instruct/i.test(id)));
+  const answer = await promptVisible(`Model [${suggestedIndex + 1}] "${shown[suggestedIndex]}": `);
+  if (answer.length === 0) return shown[suggestedIndex];
+  const asNumber = Number(answer);
+  if (Number.isInteger(asNumber) && asNumber >= 1 && asNumber <= shown.length) return shown[asNumber - 1];
+  if (shown.includes(answer)) return answer;
+  throw new Error(`"${answer}" is not one of the listed models. Nothing was saved.`);
+}
+
+/** Visible (echoing) prompt for non-secret choices. */
+function promptVisible(question) {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
+async function assistantSetup(env, args) {
+  const options = parseAssistantSetupArgs(args);
+  if (options.stt) {
+    await assistantSttSetup(env, args.filter((arg) => arg !== '--stt'));
+    return;
+  }
+
+  if (options.remove) {
+    await writeNvidiaConfig({ env, patch: { apiKey: null, model: null } });
+    process.stdout.write(
+      'NVIDIA key removed. Sparky will say it is not set up instead of guessing an answer.\n' +
+      `Config file: ${resolveNvidiaConfigPath(env)} (unrelated settings preserved).\n`,
+    );
+    await nudgeDaemon(env);
+    return;
+  }
+
+  const key = await readSecretInput(options.keyFile);
+  if (!isValidNvidiaApiKey(key)) {
+    throw new Error('That does not look like an NVIDIA API key (expected "nvapi-…" or a 40+ character token). Nothing was saved.');
+  }
+
+  const baseUrl = DEFAULT_NVIDIA_BASE_URL;
+  let model = options.model;
+  if (options.verify) {
+    process.stdout.write('Verifying the key against NVIDIA and reading the live model list…\n');
+    const probe = createNvidiaChatClient({ config: { apiKey: key, model: null, baseUrl, localOnly: false } });
+    const listed = await probe.listModels();
+    if (!listed.ok) {
+      if (listed.error.code === 'auth') {
+        throw new Error('NVIDIA rejected that key. Double-check it and run "sparkiee assistant setup" again. Nothing was saved.');
+      }
+      process.stdout.write(`Warning: could not list models right now (${listed.error.message}).\n`);
+      if (!model) {
+        throw new Error('A model id is required and the live list was unavailable. Re-run with --model <id>. Nothing was saved.');
+      }
+    } else {
+      process.stdout.write(`NVIDIA accepted the key (${listed.models.length} models available).\n`);
+      model = await chooseNvidiaModel(probe, listed.models, options.model);
+    }
+  }
+  if (!model) {
+    throw new Error('No model selected. Re-run with --model <id>, or allow verification to list the live models.');
+  }
+
+  const file = await writeNvidiaConfig({
+    env,
+    patch: { apiKey: key, model, baseUrl, localOnly: options.localOnly ? true : null },
+  });
+  process.stdout.write(
+    `Key saved (${key.length} characters, never logged) to ${file} with 0600 permissions.\n` +
+    `Model: ${model}\n` +
+    `Local-only mode: ${options.localOnly ? 'on — nothing is sent to NVIDIA until you turn it off' : 'off — chat requests go to NVIDIA'}\n` +
+    'Try it: press Ctrl+Alt+Space and ask a question, or type one in the dashboard.\n',
+  );
+  await nudgeDaemon(env);
+}
+
+/**
+ * The daemon caches config for a few seconds; a status probe makes the fresh
+ * setup visible immediately without a restart. Best-effort by design.
+ */
+async function nudgeDaemon(env) {
+  const port = resolvePort(env);
+  if (!(await getRuntime(port))) return;
+  await fetchJson(`http://${DEFAULT_HOST}:${port}/api/v1/assistant/status`).catch(() => {});
+}
+
+async function assistantStatus(env) {
+  const loaded = await loadNvidiaConfig({ env });
+  const described = describeNvidiaConfig(loaded);
+  const port = resolvePort(env);
+  const runtime = await getRuntime(port);
+
+  let conversation = null;
+  let stt = null;
+  let wake = null;
+  let mic = null;
+  let voice = null;
+  let assistantState = null;
+  if (runtime) {
+    const { response, payload } = await fetchJson(`http://${DEFAULT_HOST}:${port}/api/v1/assistant/status`).catch(() => ({ response: { ok: false } }));
+    if (response.ok) {
+      conversation = payload.assistant?.conversation ?? null;
+      stt = payload.assistant?.stt ?? null;
+      wake = payload.assistant?.wake ?? null;
+      mic = payload.assistant?.mic ?? null;
+      assistantState = payload.assistant?.state ?? null;
+    }
+    const vs = await fetchJson(`http://${DEFAULT_HOST}:${port}/api/v1/voice/status`).catch(() => ({ response: { ok: false } }));
+    if (vs.response.ok) voice = vs.payload.voice ?? null;
+  }
+
+  process.stdout.write(
+    'Sparkiee assistant readiness\n' +
+    `  Assistant state  : ${assistantState ?? (runtime ? 'unknown' : 'runtime not running')}\n` +
+    `  Microphone input : ${mic ? (mic.devices?.length ? `${mic.devices.length} device(s) available` : 'no input device found') : (runtime ? 'unknown' : 'runtime not running')}\n` +
+    `  Local STT        : ${stt ? stt.status : (runtime ? 'unknown' : 'runtime not running')}${stt?.model ? ` (${stt.model})` : ''}\n` +
+    `  NVIDIA chat      : ${conversation ? (conversation.configured ? `ready (${conversation.model})` : 'not set up') : (described.configured ? 'configured (daemon not refreshed yet)' : 'not set up')}\n` +
+    `  Local-only mode  : ${(conversation?.localOnly ?? described.localOnly) ? 'on (no transcript leaves this machine)' : 'off'}\n` +
+    `  ElevenLabs TTS   : ${voice ? (voice.configured ? 'ready' : 'no cloud key') : (runtime ? 'unknown' : 'runtime not running')}\n` +
+    `  Local TTS fallback: ${voice?.localFallback ? (voice.localFallback.available ? `ready (${voice.localFallback.binary ?? 'espeak-ng'})` : 'unavailable') : (runtime ? 'unknown' : 'runtime not running')}\n` +
+    `  Wake word        : ${wake ? wake.status : (runtime ? 'unknown' : 'runtime not running')}\n` +
+    `  NVIDIA key file  : ${resolveNvidiaConfigPath(env)}\n`,
+  );
+  for (const warning of described.warnings) process.stdout.write(`  Warning: ${warning}\n`);
+  if (conversation?.lastError) process.stdout.write(`  Last chat error: ${conversation.lastError}\n`);
+  if (!runtime) process.stdout.write('Start it with "sparkiee start" for live readiness.\n');
+}
+
+async function assistantReset(env) {
+  const { port, token } = await requireDaemon(env);
+  const { response, payload } = await fetchJson(`http://${DEFAULT_HOST}:${port}/api/v1/assistant/conversation/reset`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: '{}',
+  });
+  if (!response.ok) throw new Error(payload?.error ?? `Reset failed with HTTP ${response.status}.`);
+  process.stdout.write(`Conversation reset — ${payload.cleared ?? 0} stored message(s) forgotten.\n`);
 }
 
 async function runVoiceCommand(subcommand, args, env) {

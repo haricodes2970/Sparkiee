@@ -171,6 +171,19 @@ contextBridge.exposeInMainWorld('sparkieePet', Object.freeze({
     return () => ipcRenderer.removeListener('pet:assistant-level', listener);
   },
   /**
+   * Report the real outcome of an announced clip. The daemon is the only
+   * consumer: this is honest playback evidence, not a control channel.
+   */
+  reportSpeech(payload) {
+    if (!isPlaybackReport(payload)) return false;
+    ipcRenderer.send('pet:speech-result', {
+      id: payload.id,
+      status: payload.status,
+      detail: typeof payload.detail === 'string' ? payload.detail.slice(0, 60) : null,
+    });
+    return true;
+  },
+  /**
    * Escape pressed inside the pet window: discard the utterance in flight.
    * Only meaningful while capture is active; the server treats a redundant
    * cancel as a no-op.
@@ -179,6 +192,16 @@ contextBridge.exposeInMainWorld('sparkieePet', Object.freeze({
     return ipcRenderer.invoke('pet:cancel-utterance');
   },
 }));
+
+const PLAYBACK_STATUSES = new Set(['played', 'failed', 'muted', 'skipped']);
+
+function isPlaybackReport(payload) {
+  return Boolean(
+    payload && typeof payload === 'object' &&
+    Number.isInteger(payload.id) && payload.id > 0 &&
+    PLAYBACK_STATUSES.has(payload.status)
+  );
+}
 
 function isAssistantPayload(assistant) {
   return Boolean(

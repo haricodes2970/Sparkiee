@@ -80,10 +80,13 @@ function isPointerPoint(point) {
 
 async function requestApi(route, options = {}) {
   if (!TOKEN || !/^[a-f0-9]{64}$/.test(TOKEN)) throw new Error('Sparkiee runtime token is missing or invalid.');
+  const { timeoutMs = 1600, ...fetchOptions } = options;
   const response = await fetch(apiUrl(route), {
-    ...options,
-    signal: AbortSignal.timeout(1600),
-    headers: { accept: 'application/json', authorization: `Bearer ${TOKEN}`, ...options.headers },
+    ...fetchOptions,
+    // Summoning speaks a greeting before the mic opens, which can take a few
+    // seconds; every other route keeps the tight default.
+    signal: AbortSignal.timeout(Math.max(200, Math.min(30_000, timeoutMs))),
+    headers: { accept: 'application/json', authorization: `Bearer ${TOKEN}`, ...fetchOptions.headers },
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || `Runtime returned HTTP ${response.status}`);
@@ -516,6 +519,8 @@ async function handleHotkeyPress() {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: '{}',
+        // Greeting plays first, then the mic opens.
+        timeoutMs: 15_000,
       });
     } else if (action === 'stop') {
       await requestApi('/api/v1/assistant/ptt/stop', {
@@ -636,6 +641,19 @@ ipcMain.handle('pet:cancel-utterance', async () => {
     return { cancelled: false };
   }
 });
+// Playback telemetry from the renderer. Only the pet window may report, and
+// only a strictly-shaped payload is forwarded (no arbitrary fields).
+ipcMain.on('pet:speech-result', (event, payload) => {
+  if (!petWindow || event.sender !== petWindow.webContents) return;
+  if (!payload || !Number.isInteger(payload.id) || payload.id <= 0) return;
+  if (!['played', 'failed', 'muted', 'skipped'].includes(payload.status)) return;
+  const detail = typeof payload.detail === 'string' ? payload.detail.slice(0, 60) : null;
+  void requestApi('/api/v1/voice/playback', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: payload.id, status: payload.status, detail }),
+  }).catch(() => {});
+});
 ipcMain.on('pet:drag-start', (event, point) => {
   if (!isPointerPoint(point) || !petWindow || event.sender !== petWindow.webContents) return;
   const [windowX, windowY] = petWindow.getPosition();
@@ -701,6 +719,7 @@ app.whenReady().then(async () => {
     ipcMain.removeAllListeners('pet:drag-move');
     ipcMain.removeAllListeners('pet:drag-end');
     ipcMain.removeHandler('pet:cancel-utterance');
+    ipcMain.removeAllListeners('pet:speech-result');
   });
 
 // Deliberate or WM-initiated window closure must not kill the host process:

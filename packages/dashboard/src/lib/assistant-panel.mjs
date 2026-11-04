@@ -64,6 +64,7 @@ export function assistantPanelViewModel(payload = {}) {
   const shortcut = assistant.shortcut ?? null;
   const wake = assistant.wake ?? null;
   const mic = assistant.mic ?? null;
+  const conversation = assistant.conversation ?? null;
   const busy = BUSY_STATES.has(state) || assistant.micActive === true;
 
   return {
@@ -74,6 +75,17 @@ export function assistantPanelViewModel(payload = {}) {
     sttLabel: stt
       ? (stt.status === 'ready' ? `ready (${stt.model ?? 'tiny.en'})` : stt.status === 'unavailable' ? 'unavailable' : 'needs setup')
       : 'unknown',
+    // Conversational readiness is reported separately from wake/STT: a working
+    // microphone and recogniser prove nothing about the chat provider.
+    conversationLabel: !conversation
+      ? 'unknown'
+      : conversation.localOnly === true
+        ? 'local-only — nothing is sent to NVIDIA'
+        : conversation.configured === true
+          ? `ready (${conversation.model ?? 'model unknown'})`
+          : 'not set up — run “sparkiee assistant setup”',
+    conversationHistory: Number.isInteger(conversation?.historyMessages) ? conversation.historyMessages : 0,
+    chatError: typeof conversation?.lastError === 'string' ? conversation.lastError : '',
     micLabel: assistant.micActive && mic?.active
       ? `capturing (${Math.max(0, Math.round((Number(mic.active.elapsedMs) || 0) / 100) / 10).toFixed(1)}s)`
       : mic?.active ? 'capturing' : 'not capturing',

@@ -7,7 +7,7 @@
  * credentials.
  */
 
-export const DAEMON_ONLY_SECRET_KEYS = Object.freeze(['ELEVENLABS_API_KEY']);
+export const DAEMON_ONLY_SECRET_KEYS = Object.freeze(['ELEVENLABS_API_KEY', 'NVIDIA_API_KEY']);
 
 /**
  * Returns a shallow copy of `env` without the daemon-only secret keys.

@@ -126,6 +126,27 @@ export function createAudioCache({ dir, maxBytes = DEFAULT_MAX_CACHE_BYTES } = {
         throw error;
       }
     },
+    /**
+     * Mime-aware lookup: the cache stores the extension the provider's mime
+     * implied, so callers that only know the key (clip delivery, cache hits
+     * across providers) can find the file without guessing the format.
+     * Returns `{audio, mime}` or null.
+     */
+    async find(key) {
+      assertKey(key);
+      for (const mime of Object.keys(EXTENSIONS)) {
+        const file = path.join(root, `${key}.${extensionFor(mime)}`);
+        try {
+          const audio = await readFile(file);
+          await writeFile(file, audio, { mode: 0o600 }).catch(() => {});
+          return { audio, mime };
+        } catch (error) {
+          if (error && error.code === 'ENOENT') continue;
+          throw error;
+        }
+      }
+      return null;
+    },
     async put(key, audio, mime = 'audio/mpeg') {
       assertKey(key);
       if (!Buffer.isBuffer(audio) || audio.length === 0) return null;

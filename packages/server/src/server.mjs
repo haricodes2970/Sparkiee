@@ -10,8 +10,9 @@ import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayloa
 import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 import { parseMusicIntent, runMusicCommand } from '../../core/src/music-commands.mjs';
+import { CHAT_ERROR_MESSAGES } from '../../core/src/chat-client.mjs';
 import { createGnomeHotkeyInstaller } from '../../core/src/gnome-hotkey.mjs';
-import { createSttService, probeSttSetup } from '../../core/src/stt-service.mjs';
+import { createSttService, probeSttSetup, resolveSttModel } from '../../core/src/stt-service.mjs';
 import { hotkeyAction } from '../../core/src/voice-hotkey.mjs';
 import { createAssistantService } from './assistant-service.mjs';
 
@@ -152,6 +153,9 @@ export function createSparkieeServer({
   assistantSpeechRateMax = 8,
   hotkey = null,
   sttStatus = null,
+  chatProvider = null, // { configured(), chat(messages), describe() } — NVIDIA adapter
+  refreshChatConfig = async () => {},
+  chatHistoryLimit = 12,
   onWindowEvent = null, // ({event, pid}) => void — diagnostics sink
   gnomeKeybindingProbe = null, // testable override of the live gsettings probe
 }) {
@@ -189,6 +193,35 @@ export function createSparkieeServer({
     const speech = petController.snapshot()?.settings?.speech;
     return Boolean(speech) && speech.enabled !== false
       && speech.provider === 'elevenlabs' && speech.style !== 'chirps';
+  }
+
+  /** The line Sparky says when summoned with the shortcut. */
+  const SUMMON_GREETING = "Hey, I'm Sparky! What would you like me to do?";
+
+  /**
+   * Speak the summon greeting and wait (bounded) for the renderer to confirm
+   * that playback finished. Waiting matters: the microphone opens only after
+   * the greeting is done, so Sparky never transcribes its own voice. Returns
+   * the announcement, or null when speech is unavailable/muted/failed.
+   */
+  async function speakSummonGreeting() {
+    if (!canSpeakAssistant()) return null;
+    try {
+      const snapshot = await voiceService.speak(SUMMON_GREETING, { voiceEvent: 'greet', source: 'assistant' });
+      const announced = snapshot?.speech ?? null;
+      // Only a real clip can be played; a muted/failed announcement returns
+      // immediately (the caption still shows) and must not block the mic.
+      if (announced?.clipId && typeof voiceService.waitForPlayback === 'function') {
+        // The pet host is the only thing that can confirm audibility. With no
+        // live renderer there is nobody to report, and blocking the mic for the
+        // full timeout would break push-to-talk — so allow only a short grace.
+        const hostAlive = getHostState?.()?.pidAlive === true;
+        await voiceService.waitForPlayback(announced.id, { timeoutMs: hostAlive ? 12000 : 600 });
+      }
+      return announced;
+    } catch {
+      return null; // speech is best-effort; the mic still opens
+    }
   }
 
   /**
@@ -234,6 +267,130 @@ export function createSparkieeServer({
   }
 
   /**
+   * Speak an assistant reply with the same voice gates and music ducking as a
+   * music reply, so a conversational answer is heard, not just captioned.
+   */
+  async function speakAssistantReply(reply) {
+    const speech = petController.snapshot()?.settings?.speech;
+    const voiceEnabled = Boolean(speech) && speech.enabled !== false;
+    if (!reply || !voiceEnabled || !assistantSpeechAllowed()) return null;
+    try {
+      const snapshot = await voiceService.speak(reply, { source: 'assistant' });
+      const clip = snapshot.speech ?? null;
+      if (clip?.clipId && musicService?.duckForSpeech) {
+        musicService.duckForSpeech(Math.min(9000, 700 + reply.length * 65));
+      }
+      return clip;
+    } catch {
+      return null; // the caption still shows the truthful text
+    }
+  }
+
+  function recordAssistantAction(action) {
+    if (assistantService?.recordAction) assistantService.recordAction(action);
+  }
+
+  // -------------------------------------------------------------------------
+  // Conversation (NVIDIA). Music commands are parsed first and NEVER reach the
+  // model: "stop" or "play Madira" must stay a local music action. History is
+  // bounded and in-memory only — nothing is written to disk. When NVIDIA is
+  // unavailable (or local-only mode is on) the reply is an honest explanation,
+  // never a fabricated answer.
+  // -------------------------------------------------------------------------
+  const CHAT_SYSTEM_PROMPT = [
+    'You are Sparky, a small friendly desktop assistant living on the user\'s screen.',
+    'Reply in one or two short, plain spoken sentences. No markdown, no lists, no code,',
+    'no emoji, no stage directions. If you do not know something, say so plainly.',
+    'You cannot run commands, open applications, or control music — the user does that',
+    'with their own shortcuts, so never claim to have done it.',
+  ].join(' ');
+  let chatHistory = [];
+  let lastChatError = null;
+
+  function chatConfigured() {
+    return Boolean(chatProvider && chatProvider.configured?.() === true);
+  }
+
+  function chatStatus() {
+    const described = typeof chatProvider?.describe === 'function' ? chatProvider.describe() : null;
+    return {
+      configured: chatConfigured(),
+      localOnly: described?.localOnly === true,
+      model: described?.model ?? null,
+      baseUrl: described?.baseUrl ?? null,
+      source: described?.source ?? null,
+      historyMessages: chatHistory.length,
+      lastError: lastChatError,
+    };
+  }
+
+  function resetConversation() {
+    const cleared = chatHistory.length;
+    chatHistory = [];
+    lastChatError = null;
+    return cleared;
+  }
+
+  /** Keep only the most recent turns, trimmed to whole messages. */
+  function trimChatHistory() {
+    if (chatHistory.length > chatHistoryLimit) {
+      chatHistory = chatHistory.slice(chatHistory.length - chatHistoryLimit);
+    }
+  }
+
+  async function runChatTurn(text) {
+    const trimmed = String(text ?? '').trim().slice(0, 1000);
+    const playback = () => (musicService?.playbackStatus ? musicService.playbackStatus() : null);
+    // Pick up "sparkiee assistant setup" without a daemon restart (the holder
+    // throttles the actual disk read).
+    await refreshChatConfig().catch(() => {});
+
+    if (!trimmed) {
+      return { handled: false, intent: null, reply: 'I did not catch that.', executed: false, speech: null, playback: playback() };
+    }
+
+    if (!chatConfigured()) {
+      const described = typeof chatProvider?.describe === 'function' ? chatProvider.describe() : null;
+      lastChatError = described?.localOnly ? 'local_only' : 'not_configured';
+      const reply = described?.localOnly
+        ? 'Local-only mode is on, so I keep everything on this machine. Turn it off in the dashboard to chat with me.'
+        : 'I am not connected to a chat assistant yet. Run "sparkiee assistant setup" to set one up.';
+      const speechClip = await speakAssistantReply(reply);
+      recordAssistantAction({ kind: 'chat', text: trimmed, intent: 'chat', reply, executed: false, error: lastChatError });
+      // Nothing was actually handled: there is no assistant to handle it. The
+      // honest explanation is still returned (and spoken) so the user is never
+      // left with a silent "I did not catch that".
+      return { handled: false, intent: null, reply, executed: false, speech: speechClip, chatError: lastChatError, playback: playback() };
+    }
+
+    const messages = [
+      { role: 'system', content: CHAT_SYSTEM_PROMPT },
+      ...chatHistory,
+      { role: 'user', content: trimmed },
+    ];
+    const result = await chatProvider.chat(messages, { maxTokens: 400, temperature: 0.6 });
+
+    if (!result?.ok) {
+      const code = result?.error?.code ?? 'provider_error';
+      lastChatError = code;
+      const reply = result?.error?.message ?? CHAT_ERROR_MESSAGES.provider_error;
+      const speechClip = await speakAssistantReply(reply);
+      recordAssistantAction({ kind: 'chat', text: trimmed, intent: 'chat', reply, executed: false, error: code });
+      return { handled: true, intent: 'chat', reply, executed: false, error: true, speech: speechClip, chatError: code, playback: playback() };
+    }
+
+    lastChatError = null;
+    chatHistory = [...chatHistory, { role: 'user', content: trimmed }, { role: 'assistant', content: result.text }];
+    trimChatHistory();
+    const speechClip = await speakAssistantReply(result.text);
+    recordAssistantAction({ kind: 'chat', text: trimmed, intent: 'chat', reply: result.text, executed: false });
+    return {
+      handled: true, intent: 'chat', reply: result.text, executed: false,
+      speech: speechClip, chatModel: result.model ?? null, playback: playback(),
+    };
+  }
+
+  /**
    * The ONE text→action path. Used by the typed-command endpoint and by the
    * PTT transcript pipeline: every route runs the same parsing, throttling
    * policy, voice gate and action ledger, so speech and typing can never
@@ -242,14 +399,8 @@ export function createSparkieeServer({
   async function runTextCommand(text) {
     const intent = parseMusicIntent(text);
     if (!intent) {
-      return {
-        handled: false,
-        intent: null,
-        reply: 'I did not catch a music command. Try: play, pause, resume, stop, next, previous, volume, shuffle, find, or what is playing.',
-        executed: false,
-        speech: null,
-        playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
-      };
+      // Not a music command: it is a conversational turn.
+      return runChatTurn(text);
     }
 
     let result;
@@ -394,7 +545,9 @@ export function createSparkieeServer({
   }
 
   if (assistantService?.attachExecutor) {
-    if (!sttService) sttService = createSttService();
+    if (!sttService) {
+      sttService = createSttService({ model: resolveSttModel({ env: process.env }) });
+    }
     assistantService.attachExecutor({
       transcribe: ({ pcm, sampleRate } = {}) => sttService.transcribe({ pcm, sampleRate }),
       cancelTranscribe: () => sttService.cancel(),
@@ -721,6 +874,10 @@ export function createSparkieeServer({
           ok: true,
           speech: snapshot.speech,
           generated: Boolean(snapshot.speech?.clipId),
+          provider: snapshot.provider ?? null,
+          fallbackFrom: snapshot.fallbackFrom ?? null,
+          fallbackReason: snapshot.fallbackReason ?? null,
+          detail: typeof snapshot.detail === 'string' ? snapshot.detail : null,
         });
       } catch (error) {
         sendJson(response, error.code === 'INVALID_UTTERANCE' ? 400 : 500, {
@@ -745,10 +902,57 @@ export function createSparkieeServer({
           ok: true,
           speech: snapshot.speech,
           generated: Boolean(snapshot.speech?.clipId),
+          provider: snapshot.provider ?? null,
+          fallbackFrom: snapshot.fallbackFrom ?? null,
+          fallbackReason: snapshot.fallbackReason ?? null,
+          detail: typeof snapshot.detail === 'string' ? snapshot.detail : null,
         });
       } catch (error) {
         sendJson(response, error.code === 'RATE_LIMITED' ? 429 : 500, { error: error.message });
       }
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/voice/playback') {
+      // Playback telemetry from the trusted Electron main process: the only
+      // honest evidence of whether the user actually heard the clip. Token
+      // only — renderers never call this directly.
+      if (!isAuthorized(request, token)) {
+        sendJson(response, 401, { error: 'Unauthorized' });
+        return;
+      }
+      if (!voiceService || typeof voiceService.recordPlayback !== 'function') {
+        sendJson(response, 503, { error: 'Voice service unavailable.' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      // Validate at the trust boundary rather than trusting the service to
+      // reject: this route is reachable by any holder of the runtime token.
+      const PLAYBACK_STATUSES = ['played', 'failed', 'muted', 'skipped'];
+      const id = Number.isInteger(payload?.id) && payload.id > 0 ? payload.id : null;
+      const status = typeof payload?.status === 'string' ? payload.status : null;
+      if (id === null || status === null || !PLAYBACK_STATUSES.includes(status)) {
+        sendJson(response, 400, {
+          error: 'Invalid playback report: id must be a positive integer and status must be played, failed, muted, or skipped.',
+        });
+        return;
+      }
+      const result = voiceService.recordPlayback({
+        id,
+        clipId: typeof payload?.clipId === 'string' ? payload.clipId : null,
+        status,
+        detail: typeof payload?.detail === 'string' ? payload.detail : null,
+      });
+      if (!result.ok) {
+        sendJson(response, 400, { error: `Invalid playback report (${result.error}).` });
+        return;
+      }
+      sendJson(response, 200, { ok: true, playback: result.playback });
       return;
     }
     const clipMatch = /^\/api\/v1\/voice\/clip\/(.+)$/.exec(pathname);
@@ -844,9 +1048,11 @@ export function createSparkieeServer({
       return;
     }
     // -------------------------------------------------------------------------
-    // Assistant: deterministic text-command routing (music first). Auth-gated
-    // because commands change player state and may spend TTS credits. The
-    // recognised text never leaves this process — no AI provider is involved.
+    // Assistant: deterministic text-command routing (music first) then, only
+    // for text that is NOT a music command, one conversational turn with the
+    // configured NVIDIA chat model. Auth-gated because commands change player
+    // state and may spend TTS credits. When no chat model is configured the
+    // text is never sent anywhere — the reply is an honest explanation.
     // -------------------------------------------------------------------------
     if (method === 'POST' && pathname === '/api/v1/assistant/command') {
       if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
@@ -892,12 +1098,13 @@ export function createSparkieeServer({
       return;
     }
     if (method === 'GET' && pathname === '/api/v1/assistant/status') {
+      await refreshChatConfig().catch(() => {});
       const shortcut = hotkey
         ? hotkey.snapshot().shortcut
         : { enabled: true, accelerator: 'Control+Alt+Space', registered: null, registrationDetail: null };
       if (!assistantService) {
         const gnome = await gnomeKeybindingInfo();
-        sendJson(response, 200, { ok: true, assistant: { state: 'disabled', wake: { status: 'needs-setup', missing: ['no-service'] }, shortcut: { ...shortcut, keybinding: gnome } } });
+        sendJson(response, 200, { ok: true, assistant: { state: 'disabled', wake: { status: 'needs-setup', missing: ['no-service'] }, conversation: chatStatus(), shortcut: { ...shortcut, keybinding: gnome } } });
         return;
       }
       const snap = await assistantService.status();
@@ -917,6 +1124,7 @@ export function createSparkieeServer({
         ok: true,
         assistant: {
           ...snap,
+          conversation: chatStatus(),
           shortcut: {
             ...(hotkey
               ? hotkey.snapshot().shortcut
@@ -925,6 +1133,16 @@ export function createSparkieeServer({
           },
         },
       });
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/v1/assistant/conversation/reset') {
+      // Reset control: forget the bounded in-memory history and start fresh.
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      const cleared = resetConversation();
+      sendJson(response, 200, { ok: true, cleared, conversation: chatStatus() });
       return;
     }
     if (method === 'POST' && pathname === '/api/v1/assistant/listen') {
@@ -974,6 +1192,9 @@ export function createSparkieeServer({
       const action = hotkeyAction(await assistantService.status());
       try {
         if (action === 'start') {
+          // Greeting first, mic second: the microphone must never capture
+          // Sparky's own hello.
+          await speakSummonGreeting();
           await assistantService.startPtt();
         } else if (action === 'stop') {
           await assistantService.stopPtt();
@@ -1001,6 +1222,8 @@ export function createSparkieeServer({
         return;
       }
       try {
+        // Same greeting-before-mic rule as the toggle path.
+        await speakSummonGreeting();
         const { sessionId, done } = await assistantService.startPtt();
         const snap = await assistantService.status();
         sendJson(response, 200, { ok: true, assistant: snap, sessionId });
