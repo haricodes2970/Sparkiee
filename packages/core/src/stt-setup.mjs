@@ -11,13 +11,23 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_STT_MODEL, resolveSttDataDir, resolveSttModelDir, resolveSttVenvPython } from './stt-service.mjs';
+import { DEFAULT_STT_MODEL, STT_MODEL_CATALOG, resolveSttDataDir, resolveSttModelDir, resolveSttVenvPython, writeSttConfig } from './stt-service.mjs';
 
 const PIP_PACKAGE = 'faster-whisper';
 /** Whole-setup ceiling; the model download dominates it. */
 export const DEFAULT_SETUP_TIMEOUT_MS = 20 * 60 * 1000;
 export const MAX_SETUP_TIMEOUT_MS = DEFAULT_SETUP_TIMEOUT_MS;
-const MODEL_CACHE_DIRNAME = 'models--Systran--faster-whisper-tiny.en';
+
+/**
+ * The HF cache dir name for a model repo (faster-whisper layout).
+ * e.g. 'Systran/faster-whisper-tiny.en' → 'models--Systran--faster-whisper-tiny.en'
+ */
+export function modelCacheDirname(repo) {
+  const [org, ...rest] = String(repo).split('/');
+  return `models--${org}--${rest.join('--')}`;
+}
+
+const TINY_CACHE_DIRNAME = 'models--Systran--faster-whisper-tiny.en';
 
 export function spawnRun(cmd, args, { timeoutMs, cwd, env, onChunk } = {}) {
   return new Promise((resolve) => {
@@ -71,26 +81,49 @@ export async function setupSttEnvironment({
   timeoutMs = DEFAULT_SETUP_TIMEOUT_MS,
   runImpl = null,
   fileExists = (p) => existsSync(p),
+  model = null, // explicit choice; null keeps whatever is configured
 } = {}) {
+  let chosenModel = model ?? DEFAULT_STT_MODEL;
+  if (model !== null) {
+    if (!STT_MODEL_CATALOG[model]) {
+      const known = Object.entries(STT_MODEL_CATALOG)
+        .map(([name, meta]) => `${name} (${Math.round(meta.sizeBytes / 1_048_576)} MB)`).join(', ');
+      throw Object.assign(new Error(`UNKNOWN_STT_MODEL: "${model}". Options: ${known}.`), { code: 'UNKNOWN_STT_MODEL' });
+    }
+    if (model !== DEFAULT_STT_MODEL) {
+      // Persisting the choice IS the consent gate: nothing downloads until the
+      // user picks a bigger model explicitly.
+      await writeSttConfig({ env }, { model });
+    }
+  } else {
+    const { resolveSttModel } = await import('./stt-service.mjs');
+    chosenModel = resolveSttModel({ env });
+  }
+  const modelMeta = STT_MODEL_CATALOG[chosenModel] ?? STT_MODEL_CATALOG[DEFAULT_STT_MODEL];
+  const modelSizeMb = Math.round(modelMeta.sizeBytes / 1_048_576);
+  const cacheDirname = modelCacheDirname(modelMeta.repo);
+
   const deadline = Date.now() + timeoutMs;
   const exec = runImpl ?? spawnRun;
   const dataDir = resolveSttDataDir(env);
   const venvPython = resolveSttVenvPython(env);
   const modelDir = resolveSttModelDir(env);
   const pipArgs = ['-m', 'pip', 'install', '--disable-pip-version-check', '--quiet', PIP_PACKAGE];
-  const modelScript = `from faster_whisper import WhisperModel\nWhisperModel('${DEFAULT_STT_MODEL}', device='cpu', compute_type='int8')\nprint('model-ok')\n`;
+  const modelScript = `from faster_whisper import WhisperModel\nWhisperModel('${modelMeta.repo}', device='cpu', compute_type='int8')\nprint('model-ok')\n`;
 
   const systemPython = findSystemPython({ env, fileExists });
   if (!systemPython) {
     return { ok: false, missing: ['python'], detail: MISSING_SUPPORT };
   }
 
-  // Already healthy? Skip work without touching anything.
-  if (existsSync(venvPython) && existsSync(path.join(modelDir, MODEL_CACHE_DIRNAME))) {
+  // Already healthy? Skip work without touching anything. Uses the injected
+  // fileExists seam (not a module-level existsSync) so the check is testable
+  // and never depends on the machine the suite runs on.
+  if (fileExists(venvPython) && fileExists(path.join(modelDir, cacheDirname))) {
     const probe = await exec(venvPython, ['-c', 'import faster_whisper, sys; print("ok")'], { timeoutMs: 30_000 });
     if (probe.ok) {
-      onLine('Speech recognition is already set up. Nothing to do.');
-      return { ok: true, detail: 'already-ready', venvPython, modelDir, model: DEFAULT_STT_MODEL };
+      onLine(`${chosenModel} speech recognition is already set up. Nothing to do.`);
+      return { ok: true, detail: 'already-ready', venvPython, modelDir, model: chosenModel };
     }
   }
 
@@ -116,18 +149,18 @@ export async function setupSttEnvironment({
     return { ok: false, missing: ['stt-venv'], detail: `pip install failed (exit ${step.code}). ${step.stderr?.trim().split('\n').slice(-3).join(' ') ?? ''}`.trim() };
   }
 
-  onLine(`3/3 Downloading the tiny.en model (~75 MB) once into ${modelDir}…`);
+  onLine(`3/3 Downloading the ${chosenModel} model (~${modelSizeMb} MB, ${modelMeta.licence} · ${modelMeta.repo}) once into ${modelDir}…`);
   step = await exec(venvPython, ['-c', modelScript], {
     timeoutMs: Math.max(30_000, Math.min(deadline - Date.now(), 15 * 60_000)),
-    env: { HF_HOME: modelDir },
+    env: { HF_HOME: modelDir, SPARKIEE_STT_MODEL: chosenModel },
   });
   if (!step.ok) {
     if (Date.now() > deadline) {
-      return { ok: false, missing: ['model'], detail: 'The model download did not finish in the allowed time. Re-run "sparkiee assistant setup" to continue from the cache.' };
+      return { ok: false, missing: ['model'], detail: `The ${chosenModel} model download did not finish in the allowed time. Re-run "sparkiee assistant stt-setup" to continue from the cache.` };
     }
-    return { ok: false, missing: ['model'], detail: `Model download failed (exit ${step.code}). ${step.stderr?.trim().split('\n').slice(-3).join(' ') ?? ''}`.trim() };
+    return { ok: false, missing: ['model'], detail: `${chosenModel} model download failed (exit ${step.code}). ${step.stderr?.trim().split('\n').slice(-3).join(' ') ?? ''}`.trim() };
   }
 
-  onLine('Speech recognition is ready (tiny.en, CPU int8). Audio never leaves this machine.');
-  return { ok: true, detail: 'setup-complete', venvPython, modelDir, model: DEFAULT_STT_MODEL };
+  onLine(`Speech recognition is ready (${chosenModel}, vs Python ${process.version}). Audio leaves the mic only for the local recogniser — nothing is uploaded.`);
+  return { ok: true, detail: 'setup-complete', venvPython, modelDir, model: chosenModel };
 }

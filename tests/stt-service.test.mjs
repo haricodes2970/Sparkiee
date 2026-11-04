@@ -204,3 +204,63 @@ test('resolveSttDataDir honours XDG_DATA_HOME and defaults to ~/.local/share/spa
   const home = process.env.HOME?.trim() ? process.env.HOME : '~';
   assert.ok(resolveSttDataDir({}).includes('sparkiee/stt'), resolveSttDataDir({}));
 });
+
+// ---------------------------------------------------------------------------
+// Model config + decode quality (aligned with the proven Pisumathu settings).
+// ---------------------------------------------------------------------------
+
+test('stt catalog: large-v3-turbo entry with origin/size documented', async () => {
+  const { STT_MODEL_CATALOG } = await import('../packages/core/src/stt-service.mjs');
+  assert.ok(STT_MODEL_CATALOG['tiny.en']);
+  const turbo = STT_MODEL_CATALOG['large-v3-turbo'];
+  assert.ok(turbo, 'large-v3-turbo must be a catalog option');
+  assert.match(turbo.repo, /faster-whisper-large-v3-turbo/);
+  assert.ok(turbo.sizeBytes > 500_000_000, 'size documented honestly (>=500 MB)');
+  assert.ok(turbo.licence || turbo.license, 'licence documented');
+});
+
+test('resolveSttModel: stt.json (0600) config wins, default tiny.en otherwise', async () => {
+  const { resolveSttModel, writeSttConfig, readSttConfig, sttConfigPath } = await import('../packages/core/src/stt-service.mjs');
+  const { mkdtempSync, rmSync, statSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(`${tmpdir()}/sparkiee-sttcfg-`);
+  try {
+    const env = { XDG_CONFIG_HOME: dir };
+    assert.equal(resolveSttModel({ env }), 'tiny.en'); // no file → honest default
+    await writeSttConfig({ env }, { model: 'large-v3-turbo' });
+    const saved = statSync(`${dir}/sparkiee/stt.json`);
+    assert.equal(saved.mode & 0o777, 0o600, 'stt.json must be 0600');
+    assert.equal(resolveSttModel({ env }), 'large-v3-turbo');
+    assert.deepEqual((await readSttConfig({ env })).model, 'large-v3-turbo');
+    assert.ok(sttConfigPath({ env }).endsWith('stt.json'));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('buildTranscribeScript: model named, Pisumathu decode params, cuda→cpu fallback', async () => {
+  const { buildTranscribeScript } = await import('../packages/core/src/stt-service.mjs');
+  const script = buildTranscribeScript('large-v3-turbo');
+  assert.ok(script.includes("'large-v3-turbo'"), 'model name in script');
+  assert.ok(/temperature\s*=\s*0\.0/.test(script), 'temperature pinned to 0');
+  assert.ok(/condition_on_previous_text\s*=\s*False/.test(script), 'no hallucination chains');
+  assert.ok(/beam_size\s*=\s*5/.test(script), 'beam_size 5');
+  assert.ok(/best_of\s*=\s*5/.test(script), 'best_of 5');
+  assert.ok(/vad_filter\s*=\s*True/.test(script), 'Silero VAD on');
+  assert.ok(/device='cuda'/.test(script), 'tries CUDA first');
+  assert.ok(/device='cpu'/.test(script), 'falls back to CPU');
+});
+
+test('createSttService: model overridable via config; env carries model name', async () => {
+  const children = [];
+  const captured = {};
+  const spawnImpl = (bin, args, opts) => {
+    captured.args = args; captured.env = opts?.env;
+    const c = fakeChild({ output: JSON.stringify({ text: 'x', source: 'int16le:16000', segments: [] }) });
+    children.push(c);
+    setImmediate(() => c.respond());
+    return c;
+  };
+  const svc = createSttService({ spawnImpl, venvPython: '/fake/venv/bin/python', model: 'large-v3-turbo' });
+  await svc.transcribe({ pcm: pcmBytes(600) });
+  assert.ok(captured.env?.SPARKIEE_STT_MODEL === 'large-v3-turbo', captured.env?.SPARKIEE_STT_MODEL);
+  assert.ok(captured.args.includes('large-v3-turbo'));
+});

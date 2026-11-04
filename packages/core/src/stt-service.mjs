@@ -17,11 +17,28 @@
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
 
 /** Shallow fs presence helper kept injectable in probe options. */
-import { existsSync } from 'node:fs';
 
 export const DEFAULT_STT_MODEL = 'tiny.en';
+/** Proven-quality default for CUDA machines (larger but GPU-friendly). */
+export const RECOMMENDED_STT_MODEL = 'large-v3-turbo';
+export const STT_MODEL_CATALOG = Object.freeze({
+  'tiny.en': Object.freeze({
+    repo: 'Systran/faster-whisper-tiny.en',
+    sizeBytes: 78_000_000,
+    params: '39M',
+    licence: 'MIT (converted OpenAI Whisper weights)',
+  }),
+  'large-v3-turbo': Object.freeze({
+    repo: 'deepdml/faster-whisper-large-v3-turbo-ct2',
+    sizeBytes: 1_620_000_000,
+    params: '809M',
+    licence: 'MIT (converted OpenAI Whisper large-v3-turbo weights)',
+  }),
+});
 export const STT_PROVIDER = 'faster-whisper';
 export const TRANSCRIPT_MAX_CHARS = 500;
 export const STT_BUSY = 'STT_BUSY';
@@ -50,20 +67,83 @@ export function resolveSttModelDir(env = process.env) {
   return path.join(resolveSttDataDir(env), 'models');
 }
 
+/** Protected user config for the recogniser model: $XDG_CONFIG_HOME/sparkiee/stt.json (0600). */
+export function sttConfigPath(env = process.env) {
+  const base = env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.trim().length > 0
+    ? env.XDG_CONFIG_HOME.trim()
+    : path.join(os.homedir(), '.config');
+  return path.join(base, 'sparkiee', 'stt.json');
+}
+
+export async function readSttConfig({ env = process.env } = {}) {
+  try {
+    const parsed = JSON.parse(readFileSync(sttConfigPath(env), 'utf8'));
+    const model = typeof parsed?.model === 'string' && STT_MODEL_CATALOG[parsed.model] ? parsed.model : null;
+    return { model: model ?? DEFAULT_STT_MODEL };
+  } catch {
+    return { model: DEFAULT_STT_MODEL };
+  }
+}
+
+/** Explicit consent boundary: writing a model choice means downloading it. */
+export async function writeSttConfig({ env = process.env } = {}, partial = {}) {
+  const current = await readSttConfig({ env });
+  let model = current.model;
+  if (typeof partial?.model === 'string') {
+    if (!STT_MODEL_CATALOG[partial.model]) {
+      throw Object.assign(new Error(`UNKNOWN_STT_MODEL: "${partial.model}". Options: ${Object.keys(STT_MODEL_CATALOG).join(', ')}.`), { code: 'UNKNOWN_STT_MODEL' });
+    }
+    model = partial.model;
+  }
+  const file = sttConfigPath(env);
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await writeFile(file, `${JSON.stringify({ model, version: 1 }, null, 2)}\n`, { mode: 0o600 });
+  await chmod(file, 0o600);
+  return { model };
+}
+
+/** Configured model (catalog-validated); default tiny.en when nothing is set. Never throws. */
+export function resolveSttModel({ env = process.env } = {}) {
+  try {
+    const parsed = JSON.parse(readFileSync(sttConfigPath(env), 'utf8'));
+    if (parsed && STT_MODEL_CATALOG[parsed.model]) return parsed.model;
+  } catch {
+    // No config file or junk: the documented default stands.
+  }
+  return DEFAULT_STT_MODEL;
+}
+
+
+
 /**
  * Inline recogniser program. Reads raw s16le mono PCM on stdin, prints ONE
  * JSON line on stdout. Kept as a template string so no temp file is needed.
  */
 export const TRANSCRIBE_SCRIPT = `
-import json, sys
+import json, sys, os
 import numpy as np
 from faster_whisper import WhisperModel
 
+MODEL_NAME = os.environ.get('SPARKIEE_STT_MODEL', 'INSERT_MODEL')
 pcm = sys.stdin.buffer.read()
 audio = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
-model = WhisperModel('tiny.en', device='cpu', compute_type='int8')
-segments, info = model.transcribe(audio, language='en', beam_size=1, vad_filter=True)
-out = {'source': 'int16le:16000', 'segments': []}
+def _load_model():
+    # CUDA first (machines with a real GPU), CPU int8 as the honest fallback.
+    try:
+        return WhisperModel(MODEL_NAME, device='cuda', compute_type='int8_float16'), 'cuda'
+    except Exception:
+        return WhisperModel(MODEL_NAME, device='cpu', compute_type='int8'), 'cpu'
+model, device = _load_model()
+segments, info = model.transcribe(
+    audio,
+    language='en',
+    beam_size=5,
+    best_of=5,
+    temperature=0.0,
+    condition_on_previous_text=False,
+    vad_filter=True,
+)
+out = {'source': 'int16le:16000', 'device': device, 'segments': []}
 texts = []
 for s in segments:
     out['segments'].append({
@@ -75,6 +155,16 @@ for s in segments:
 out['text'] = ' '.join(texts).strip()
 sys.stdout.write(json.dumps(out) + '\\n')
 `;
+
+/**
+ * Script text for a configured model. The raw model name is interpolated as
+ * a fallback (the env SPARKIEE_STT_MODEL still wins at runtime), and the
+ * recogniser always runs inside the managed venv only.
+ */
+export function buildTranscribeScript(model = DEFAULT_STT_MODEL) {
+  const safe = String(model ?? DEFAULT_STT_MODEL).replace(/[^A-Za-z0-9._-]/g, '');
+  return TRANSCRIBE_SCRIPT.replace("'INSERT_MODEL'", `'${safe}'`);
+}
 
 /**
  * Validate a transcript produced by the recogniser. Returns the trimmed
@@ -173,7 +263,7 @@ export function createSttService({
       const stdoutBuffer = [];
       let child;
       try {
-        child = spawnImpl(venvPython, ['-c', TRANSCRIBE_SCRIPT, model], {
+        child = spawnImpl(venvPython, ['-c', buildTranscribeScript(model), model], {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: { ...env, HF_HOME: resolveSttModelDir(env), SPARKIEE_STT_MODEL: model },
         });
