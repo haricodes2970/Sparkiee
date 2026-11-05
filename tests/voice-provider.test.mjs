@@ -298,7 +298,10 @@ test('in-flight requests for the same phrase share one provider call', async () 
   try {
     const p1 = service.speak('Still working on it!');
     const p2 = service.speak('Still working on it!');
-    await new Promise((r) => setTimeout(r, 10));
+    const deadline = Date.now() + 2_000;
+    while (typeof resolveFirst !== 'function' && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
     resolveFirst();
     await Promise.all([p1, p2]);
     assert.equal(invocations, 1);

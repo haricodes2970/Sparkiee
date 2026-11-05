@@ -6,11 +6,27 @@ chirps without any of these.
 ## Local speech recognition (already installed)
 
 ```text
-sparkiee assistant setup
+sparkiee assistant stt-setup --model large-v3-turbo
 ```
 
-Idempotent; safe to re-run. Installs a venv + faster-whisper + tiny.en model
-under `~/.local/share/sparkiee/stt/`. No audio ever leaves the machine.
+Idempotent; safe to re-run. Installs the venv under
+`~/.local/share/sparkiee/stt/` and downloads the chosen model **once**, into
+the shared Hugging Face cache (`~/.cache/huggingface/hub`) that every local
+app can reuse — nothing is duplicated per project. `tiny.en` stays available
+as the small fallback. Commands never touch the network: recognition runs
+offline on the loaded model (resident in the daemon, so after the first
+utterance replies take well under a second on the GPU).
+
+GPU recognition additionally needs the CUDA runtime libraries once,
+shared by every app too:
+
+```text
+~/.local/share/sparkiee/stt/venv/bin/python -m pip install --target \
+  ~/.local/share/cuda-libs nvidia-cublas-cu12 nvidia-cudnn-cu12
+```
+
+Without them the recogniser falls back to CPU int8 and says so; it never
+pretends the GPU worked. No audio ever leaves the machine.
 
 ## ElevenLabs voice (optional)
 

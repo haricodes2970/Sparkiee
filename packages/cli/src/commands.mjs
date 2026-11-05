@@ -93,7 +93,8 @@ Commands:
                Show honest, separate readiness for mic, STT, NVIDIA, TTS
   assistant reset
                Forget the in-memory conversation history
-  assistant stt-setup  One-time local speech-recognition setup (venv + tiny.en model)
+  assistant stt-setup  One-time local speech-recognition setup (venv + model;
+                       use --model large-v3-turbo for higher accuracy)
   assistant hotkey install|status|remove
                Manage the GNOME media-keys fallback binding for the mic shortcut
   voice status Show whether Sparky's spoken voice is configured
@@ -627,7 +628,7 @@ async function assistantSttSetup(env, args) {
       i += 1;
     } else if (arg === '--model') {
       const raw = args[i + 1];
-      if (!raw) throw new Error('--model requires a value (see sparkiee assistant stt-setup --model-list).');
+      if (!raw) throw new Error('--model requires a value: tiny.en | large-v3-turbo.');
       model = raw;
       i += 1;
     } else {
