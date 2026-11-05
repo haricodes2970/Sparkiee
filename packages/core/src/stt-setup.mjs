@@ -152,7 +152,7 @@ export async function setupSttEnvironment({
   onLine(`3/3 Downloading the ${chosenModel} model (~${modelSizeMb} MB, ${modelMeta.licence} · ${modelMeta.repo}) once into ${modelDir}…`);
   step = await exec(venvPython, ['-c', modelScript], {
     timeoutMs: Math.max(30_000, Math.min(deadline - Date.now(), 15 * 60_000)),
-    env: { HF_HOME: modelDir, SPARKIEE_STT_MODEL: chosenModel },
+    env: { HUGGINGFACE_HUB_CACHE: modelDir, SPARKIEE_STT_MODEL: chosenModel },
   });
   if (!step.ok) {
     if (Date.now() > deadline) {

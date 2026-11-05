@@ -177,7 +177,7 @@ test('probeSttSetup: nothing installed → needs-setup with python/module/model 
 
 test('probeSttSetup: ready when venv python checks module+model via runCheck', async () => {
   const probe = await probeSttSetup({
-    env: { XDG_DATA_HOME: '/fake/data' },
+    env: { XDG_DATA_HOME: '/fake/data', XDG_CONFIG_HOME: '/nonexistent-sparkiee-test-config' },
     pythonBin: () => '/usr/bin/python3',
     fileExists: (p) => true,
     runCheck: async () => ({ ok: true, model: DEFAULT_STT_MODEL }),
@@ -263,4 +263,91 @@ test('createSttService: model overridable via config; env carries model name', a
   await svc.transcribe({ pcm: pcmBytes(600) });
   assert.ok(captured.env?.SPARKIEE_STT_MODEL === 'large-v3-turbo', captured.env?.SPARKIEE_STT_MODEL);
   assert.ok(captured.args.includes('large-v3-turbo'));
+});
+
+// ---------------------------------------------------------------------------
+// One global model cache: the HF hub convention, shared by every app.
+// ---------------------------------------------------------------------------
+
+test('resolveSttModelDir: global HF hub cache, honours HF_HOME / HUGGINGFACE_HUB_CACHE', async () => {
+  const { resolveSttModelDir } = await import('../packages/core/src/stt-service.mjs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  assert.equal(resolveSttModelDir({}), path.join(os.homedir(), '.cache', 'huggingface', 'hub'));
+  assert.equal(resolveSttModelDir({ HF_HOME: '/tmp/hfhome' }), '/tmp/hfhome/hub');
+  assert.equal(resolveSttModelDir({ HF_HOME: '/tmp/hfhome', HUGGINGFACE_HUB_CACHE: '/shared/hub' }), '/shared/hub');
+});
+
+test('createSttService: recogniser resolves the GLOBAL hub cache, not an app-private copy', async () => {
+  const captured = {};
+  const c = fakeChild({ output: JSON.stringify({ text: 'x', source: 'int16le:16000', segments: [] }) });
+  const svc = createSttService({
+    venvPython: '/fake/venv/bin/python',
+    env: { HUGGINGFACE_HUB_CACHE: '/shared/hub' },
+    spawnImpl: (bin, args, opts) => { captured.env = opts?.env; setImmediate(() => c.respond()); return c; },
+  });
+  await svc.transcribe({ pcm: pcmBytes(600) });
+  assert.equal(captured.env?.HUGGINGFACE_HUB_CACHE, '/shared/hub');
+  assert.equal(captured.env?.HF_HOME, undefined, 'must not nest a private hub inside HF_HOME');
+});
+
+test('probeSttSetup: reports the CONFIGURED model, not the fallback, when healthy', async () => {
+  const { probeSttSetup } = await import('../packages/core/src/stt-service.mjs');
+  const { mkdtempSync, rmSync, writeFileSync, mkdirSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(`${tmpdir()}/sparkiee-probe-`);
+  try {
+    mkdirSync(`${dir}/sparkiee`, { recursive: true });
+    writeFileSync(`${dir}/sparkiee/stt.json`, JSON.stringify({ model: 'large-v3-turbo' }));
+    const probe = await probeSttSetup({
+      env: { XDG_CONFIG_HOME: dir, XDG_DATA_HOME: `${dir}/data` },
+      pythonBin: () => '/usr/bin/python3',
+      fileExists: () => true,
+      runCheck: async () => ({ ok: true }),
+    });
+    assert.equal(probe.status, 'ready');
+    assert.equal(probe.model, 'large-v3-turbo');
+    assert.ok(probe.sizeBytes > 1_000_000_000, 'reports the real model size');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// GPU runtime: shared CUDA libs + a fallback that survives decode-time errors.
+// ---------------------------------------------------------------------------
+
+test('buildTranscribeScript: CUDA attempt wraps transcribe itself, CPU retry after failure', async () => {
+  const { buildTranscribeScript } = await import('../packages/core/src/stt-service.mjs');
+  const script = buildTranscribeScript('large-v3-turbo');
+  // The cublas/cudnn failure surfaces during encode, not model load — the
+  // fallback must cover the decode call, not just construction.
+  assert.ok(/def _decode\(/.test(script), 'decode step factored out');
+  assert.ok(/except Exception:\s*\n\s*model = WhisperModel\(MODEL_NAME, device='cpu'/.test(script), 'CPU retry happens after any GPU failure');
+  assert.ok(/return list\(model\.transcribe\(/.test(script), 'generator is materialised inside the guarded block');
+});
+
+test('createSttService: injects the shared CUDA library path when that dir exists', async () => {
+  const captured = {};
+  const c = fakeChild({ output: JSON.stringify({ text: 'x', source: 'int16le:16000', segments: [] }) });
+  const svc = createSttService({
+    venvPython: '/fake/venv/bin/python',
+    cudaLibsDir: '/shared/cuda-libs',
+    cudaLibsExist: true,
+    spawnImpl: (bin, args, opts) => { captured.env = opts?.env; setImmediate(() => c.respond()); return c; },
+  });
+  await svc.transcribe({ pcm: pcmBytes(600) });
+  const ld = captured.env?.LD_LIBRARY_PATH ?? '';
+  assert.ok(ld.includes('/shared/cuda-libs/nvidia/cublas/lib'), ld);
+  assert.ok(ld.includes('/shared/cuda-libs/nvidia/cudnn/lib'), ld);
+});
+
+test('createSttService: leaves LD_LIBRARY_PATH alone when the shared dir is absent', async () => {
+  const captured = {};
+  const c = fakeChild({ output: JSON.stringify({ text: 'x', source: 'int16le:16000', segments: [] }) });
+  const svc = createSttService({
+    venvPython: '/fake/venv/bin/python',
+    cudaLibsExist: false,
+    spawnImpl: (bin, args, opts) => { captured.env = opts?.env; setImmediate(() => c.respond()); return c; },
+  });
+  await svc.transcribe({ pcm: pcmBytes(600) });
+  assert.equal(captured.env?.LD_LIBRARY_PATH, undefined);
 });

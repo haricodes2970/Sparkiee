@@ -47,7 +47,7 @@ test('setup walks venv → pip → model and reports each failure point', async 
     { test: isPipStep, result: () => ({ ok: true, code: 0 }) },
     { test: isModelStep, result: () => ({ ok: false, code: 5, stderr: 'offline' }) },
   ]);
-  const step3 = await setupSttEnvironment({ env: {}, fileExists: noPreexistingInstall, runImpl: modelFail.runImpl });
+  const step3 = await setupSttEnvironment({ env: { XDG_CONFIG_HOME: '/nonexistent-sparkiee-test-config' }, fileExists: noPreexistingInstall, runImpl: modelFail.runImpl });
   assert.equal(step3.ok, false);
   assert.deepEqual(step3.missing, ['model']);
   assert.match(step3.detail, /offline/i);
@@ -59,7 +59,7 @@ test('setup passes the model environment to the recogniser script', async () => 
     { test: isPipStep, result: () => ({ ok: true, code: 0 }) },
     { test: isModelStep, result: () => ({ ok: true, code: 0, stdout: 'model-ok' }) },
   ]);
-  const result = await setupSttEnvironment({ env: {}, fileExists: noPreexistingInstall, runImpl: runner.runImpl });
+  const result = await setupSttEnvironment({ env: { XDG_CONFIG_HOME: '/nonexistent-sparkiee-test-config' }, fileExists: noPreexistingInstall, runImpl: runner.runImpl });
   assert.equal(result.ok, true);
   const modelStep = runner.calls.find(({ args }) => args.includes('-c'));
   assert.ok(modelStep, 'model step ran');

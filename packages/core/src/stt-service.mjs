@@ -63,8 +63,51 @@ export function resolveSttVenvPython(env = process.env) {
   return path.join(resolveSttDataDir(env), 'venv', 'bin', 'python');
 }
 
+/**
+ * Shared CUDA runtime libraries (cuBLAS/cuDNN wheels) used by every local
+ * ML app on this machine — installed once, never per-venv. Public binaries,
+ * so they live under the shared data dir rather than an app-private one.
+ */
+export function resolveCudaLibsDir(env = process.env) {
+  const explicit = typeof env.SPARKIEE_CUDA_LIBS === 'string' && env.SPARKIEE_CUDA_LIBS.trim().length > 0
+    ? env.SPARKIEE_CUDA_LIBS.trim()
+    : null;
+  if (explicit) return explicit;
+  const base = env.XDG_DATA_HOME && env.XDG_DATA_HOME.trim().length > 0
+    ? env.XDG_DATA_HOME.trim()
+    : path.join(os.homedir(), '.local', 'share');
+  return path.join(base, 'cuda-libs');
+}
+
+/** LD_LIBRARY_PATH that makes the shared CUDA wheels discoverable. */
+export function cudaLibraryPath(cudaLibsDir, env = process.env) {
+  const parts = [
+    path.join(cudaLibsDir, 'nvidia', 'cublas', 'lib'),
+    path.join(cudaLibsDir, 'nvidia', 'cudnn', 'lib'),
+  ];
+  if (typeof env.LD_LIBRARY_PATH === 'string' && env.LD_LIBRARY_PATH.trim().length > 0) {
+    parts.push(env.LD_LIBRARY_PATH.trim());
+  }
+  return parts.join(':');
+}
+
+/**
+ * One global model cache for every app that needs Whisper weights, using the
+ * Hugging Face hub convention (~/.cache/huggingface/hub by default). The
+ * weights are public files, so no app-private 0700 copy is duplicated.
+ * Precedence matches huggingface_hub itself: HUGGINGFACE_HUB_CACHE, then
+ * HF_HOME/hub, then the default cache dir.
+ */
 export function resolveSttModelDir(env = process.env) {
-  return path.join(resolveSttDataDir(env), 'models');
+  const explicit = typeof env.HUGGINGFACE_HUB_CACHE === 'string' && env.HUGGINGFACE_HUB_CACHE.trim().length > 0
+    ? env.HUGGINGFACE_HUB_CACHE.trim()
+    : null;
+  if (explicit) return explicit;
+  const hfHome = typeof env.HF_HOME === 'string' && env.HF_HOME.trim().length > 0
+    ? env.HF_HOME.trim()
+    : null;
+  if (hfHome) return path.join(hfHome, 'hub');
+  return path.join(os.homedir(), '.cache', 'huggingface', 'hub');
 }
 
 /** Protected user config for the recogniser model: $XDG_CONFIG_HOME/sparkiee/stt.json (0600). */
@@ -127,22 +170,27 @@ from faster_whisper import WhisperModel
 MODEL_NAME = os.environ.get('SPARKIEE_STT_MODEL', 'INSERT_MODEL')
 pcm = sys.stdin.buffer.read()
 audio = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
-def _load_model():
+def _decode(model):
+    # Materialised here: the CUDA failure (cublas/cudnn) surfaces during
+    # encode, not at construction, so the guarded block must cover decoding.
+    return list(model.transcribe(
+        audio,
+        language='en',
+        beam_size=5,
+        best_of=5,
+        temperature=0.0,
+        condition_on_previous_text=False,
+        vad_filter=True,
+    )[0])
+def _run():
     # CUDA first (machines with a real GPU), CPU int8 as the honest fallback.
     try:
-        return WhisperModel(MODEL_NAME, device='cuda', compute_type='int8_float16'), 'cuda'
+        model = WhisperModel(MODEL_NAME, device='cuda', compute_type='int8_float16')
+        return _decode(model), 'cuda'
     except Exception:
-        return WhisperModel(MODEL_NAME, device='cpu', compute_type='int8'), 'cpu'
-model, device = _load_model()
-segments, info = model.transcribe(
-    audio,
-    language='en',
-    beam_size=5,
-    best_of=5,
-    temperature=0.0,
-    condition_on_previous_text=False,
-    vad_filter=True,
-)
+        model = WhisperModel(MODEL_NAME, device='cpu', compute_type='int8')
+        return _decode(model), 'cpu'
+segments, device = _run()
 out = {'source': 'int16le:16000', 'device': device, 'segments': []}
 texts = []
 for s in segments:
@@ -196,6 +244,8 @@ export function createSttService({
   minPcmBytes = MIN_PCM_BYTES,
   env = process.env,
   now = () => Date.now(),
+  cudaLibsDir = resolveCudaLibsDir(env),
+  cudaLibsExist = () => existsSync(cudaLibsDir),
 } = {}) {
   let flight = null;
 
@@ -262,10 +312,16 @@ export function createSttService({
 
       const stdoutBuffer = [];
       let child;
+      const hasCudaLibs = typeof cudaLibsExist === 'function' ? Boolean(cudaLibsExist()) : Boolean(cudaLibsExist);
       try {
         child = spawnImpl(venvPython, ['-c', buildTranscribeScript(model), model], {
           stdio: ['pipe', 'pipe', 'pipe'],
-          env: { ...env, HF_HOME: resolveSttModelDir(env), SPARKIEE_STT_MODEL: model },
+          env: {
+            ...env,
+            HUGGINGFACE_HUB_CACHE: resolveSttModelDir(env),
+            SPARKIEE_STT_MODEL: model,
+            ...(hasCudaLibs ? { LD_LIBRARY_PATH: cudaLibraryPath(cudaLibsDir, env) } : {}),
+          },
         });
       } catch (error) {
         finish(session, {
@@ -381,7 +437,9 @@ export async function probeSttSetup({
   const venvPython = resolveSttVenvPython(env);
   const dataDir = resolveSttDataDir(env);
   const modelDir = resolveSttModelDir(env);
-  const details = { _paths: { venvPython, dataDir, modelDir }, model: DEFAULT_STT_MODEL };
+  const configuredModel = resolveSttModel({ env });
+  const modelMeta = STT_MODEL_CATALOG[configuredModel] ?? STT_MODEL_CATALOG[DEFAULT_STT_MODEL];
+  const details = { _paths: { venvPython, dataDir, modelDir }, model: configuredModel };
 
   if (fileExists(venvPython) && runCheck) {
     let check = { ok: false };
@@ -395,10 +453,10 @@ export async function probeSttSetup({
         provider: STT_PROVIDER,
         status: 'ready',
         missing: [],
-        model: DEFAULT_STT_MODEL,
-        sizeBytes: 75_000_000,
-        origin: 'Systran/faster-whisper-tiny.en (converted OpenAI Whisper weights, MIT licence)',
-        detail: 'Local speech recognition is ready (tiny.en, CPU int8). Audio stays on this machine.',
+        model: configuredModel,
+        sizeBytes: modelMeta.sizeBytes,
+        origin: `${modelMeta.repo} (converted OpenAI Whisper weights, MIT licence)`,
+        detail: `Local speech recognition is ready (${configuredModel}). Audio stays on this machine.`,
         pythonBin: undefined,
         ...details,
       };
@@ -417,12 +475,12 @@ export async function probeSttSetup({
     provider: STT_PROVIDER,
     status,
     missing,
-    model: DEFAULT_STT_MODEL,
-    sizeBytes: 75_000_000,
-    origin: 'Systran/faster-whisper-tiny.en (converted OpenAI Whisper weights, MIT licence)',
+    model: configuredModel,
+    sizeBytes: modelMeta.sizeBytes,
+    origin: `${modelMeta.repo} (converted OpenAI Whisper weights, MIT licence)`,
     detail: status === 'unavailable'
       ? 'No usable system Python was found — install python3, then run the explicit STT setup step.'
-      : 'Local speech recognition needs a one-time explicit setup: it creates a venv, pip-installs faster-whisper (~75 MB with deps) and downloads the tiny.en model (~75 MB) only when you run the setup command.',
+      : `Local speech recognition needs a one-time explicit setup: it creates a venv, pip-installs faster-whisper and downloads the ${configuredModel} model (~${Math.round(modelMeta.sizeBytes / 1_048_576)} MB) only when you run the setup command.`,
     pythonBin: undefined,
     ...details,
   };
