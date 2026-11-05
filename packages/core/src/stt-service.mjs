@@ -215,6 +215,100 @@ export function buildTranscribeScript(model = DEFAULT_STT_MODEL) {
 }
 
 /**
+ * Resident recogniser: loads the model once, then serves any number of
+ * utterances over stdin/stdout (newline JSON header + raw PCM). This is the
+ * difference between ~0.7 s and ~4 s per command: the one-shot program pays
+ * the model/GPU-context load on every utterance.
+ */
+export const WORKER_SCRIPT = `
+import json, sys, os
+import numpy as np
+from faster_whisper import WhisperModel
+
+MODEL_NAME = os.environ.get('SPARKIEE_STT_MODEL', 'INSERT_MODEL')
+model = None
+device = None
+gpu_error = None
+
+def _load(use_cuda):
+    global model, device, gpu_error
+    if model is not None:
+        return
+    try:
+        if use_cuda:
+            model = WhisperModel(MODEL_NAME, device='cuda', compute_type='int8_float16')
+            device = 'cuda'
+        else:
+            model = WhisperModel(MODEL_NAME, device='cpu', compute_type='int8')
+            device = 'cpu'
+    except Exception as exc:
+        model = None
+        if use_cuda:
+            gpu_error = str(exc)[:300]
+            _load(False)
+        else:
+            raise
+
+def _infer(audio):
+    segments = list(model.transcribe(
+        audio,
+        language='en',
+        beam_size=5,
+        best_of=5,
+        temperature=0.0,
+        condition_on_previous_text=False,
+        vad_filter=True,
+    )[0])
+    return [{
+        'text': s.text,
+        'no_speech_prob': round(float(s.no_speech_prob), 3),
+        'avg_logprob': round(float(s.avg_logprob), 3),
+    } for s in segments]
+
+def main():
+    global model, device, gpu_error
+    for line in sys.stdin.buffer:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            header = json.loads(line)
+        except Exception:
+            continue
+        rid = header.get('id')
+        count = int(header.get('bytes') or 0)
+        pcm = sys.stdin.buffer.read(count)
+        audio = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
+        payload = {'id': rid, 'source': 'int16le:16000'}
+        try:
+            _load(True)
+            try:
+                segments = _infer(audio)
+            except Exception as exc:
+                # Decode-time GPU failures (cublas/cudnn, OOM) reload on CPU once.
+                gpu_error = str(exc)[:300]
+                model = None
+                _load(False)
+                segments = _infer(audio)
+            payload['device'] = device
+            if gpu_error:
+                payload['gpu_error'] = gpu_error
+            payload['segments'] = segments
+            payload['text'] = ' '.join(s['text'] for s in segments).strip()
+        except Exception as exc:
+            payload['error'] = str(exc)
+        sys.stdout.write(json.dumps(payload) + '\\n')
+        sys.stdout.flush()
+
+main()
+`;
+
+export function buildWorkerScript(model = DEFAULT_STT_MODEL) {
+  const safe = String(model ?? DEFAULT_STT_MODEL).replace(/[^A-Za-z0-9._-]/g, '');
+  return WORKER_SCRIPT.replace("'INSERT_MODEL'", `'${safe}'`);
+}
+
+/**
  * Validate a transcript produced by the recogniser. Returns the trimmed
  * text, or throws typed errors for junk. Empty input is allowed ('' after
  * trimming) — callers map that to a silence result.
@@ -246,8 +340,29 @@ export function createSttService({
   now = () => Date.now(),
   cudaLibsDir = resolveCudaLibsDir(env),
   cudaLibsExist = () => existsSync(cudaLibsDir),
+  persistent = false,
+  idleMs = 120_000,
 } = {}) {
   let flight = null;
+  /** Resident worker state (persistent mode only). */
+  let worker = null; // { child, buffer, idleTimer }
+  let workerPending = null; // { session, id, startedAt }
+  let workerSeq = 0;
+  let disposed = false;
+
+  const recogniserEnv = () => {
+    const hasCudaLibs = typeof cudaLibsExist === 'function' ? Boolean(cudaLibsExist()) : Boolean(cudaLibsExist);
+    return {
+      ...env,
+      HUGGINGFACE_HUB_CACHE: resolveSttModelDir(env),
+      SPARKIEE_STT_MODEL: model,
+      // Weights are already on disk: never let a recogniser call touch the
+      // network (hub metadata checks add seconds and break the local guarantee).
+      HF_HUB_OFFLINE: '1',
+      TRANSFORMERS_OFFLINE: '1',
+      ...(hasCudaLibs ? { LD_LIBRARY_PATH: cudaLibraryPath(cudaLibsDir, env) } : {}),
+    };
+  };
 
   function finish(session, payload) {
     if (session.settled) return;
@@ -278,6 +393,144 @@ export function createSttService({
     }
   }
 
+  function workerFailPending(detail) {
+    if (!workerPending) return;
+    const pending = workerPending;
+    workerPending = null;
+    if (pending.session.timer) clearTimeout(pending.session.timer);
+    finish(pending.session, { status: 'error', error: detail, ms: now() - pending.startedAt });
+  }
+
+  /** Kill the resident recogniser; any in-flight request fails honestly. */
+  function stopWorker(detail = 'Speech recogniser stopped before replying.') {
+    if (worker) {
+      const { child, idleTimer } = worker;
+      if (idleTimer) clearTimeout(idleTimer);
+      worker = null;
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // already gone
+      }
+      setTimeout(() => {
+        try {
+          if (child.exitCode === null && !child.killed) child.kill('SIGKILL');
+        } catch {
+          // already gone
+        }
+      }, KILL_GRACE_MS).unref?.();
+    }
+    workerFailPending(detail);
+  }
+
+  function touchWorkerIdle() {
+    if (!worker || !(idleMs > 0)) return;
+    if (worker.idleTimer) clearTimeout(worker.idleTimer);
+    worker.idleTimer = setTimeout(() => stopWorker(), idleMs);
+    worker.idleTimer.unref?.();
+  }
+
+  function workerResult(session, parsed, startedAt) {
+    if (!parsed || typeof parsed.text !== 'string') {
+      finish(session, {
+        status: 'error',
+        error: typeof parsed?.error === 'string' && parsed.error.length > 0
+          ? parsed.error
+          : 'Speech recogniser produced no usable transcript.',
+        ms: now() - startedAt,
+      });
+      return;
+    }
+    const text = validateTranscript(parsed.text);
+    finish(session, {
+      status: text.length === 0 ? 'silence' : 'ok',
+      text,
+      source: typeof parsed.source === 'string' ? parsed.source : 'int16le:16000',
+      segments: Array.isArray(parsed.segments) ? parsed.segments : [],
+      ms: now() - startedAt,
+    });
+  }
+
+  function startWorker() {
+    const child = spawnImpl(venvPython, ['-u', '-c', buildWorkerScript(model)], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: recogniserEnv(),
+    });
+    const state = { child, buffer: '', idleTimer: null };
+    worker = state;
+    child.stdout?.setEncoding?.('utf8');
+    child.stdout?.on('data', (chunk) => {
+      state.buffer += chunk;
+      let newline = state.buffer.indexOf('\n');
+      while (newline >= 0) {
+        const line = state.buffer.slice(0, newline).trim();
+        state.buffer = state.buffer.slice(newline + 1);
+        newline = state.buffer.indexOf('\n');
+        if (!line || !workerPending) continue;
+        let parsed = null;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (parsed?.id !== workerPending.id) continue;
+        const pending = workerPending;
+        workerPending = null;
+        if (pending.session.timer) clearTimeout(pending.session.timer);
+        workerResult(pending.session, parsed, pending.startedAt);
+        touchWorkerIdle();
+      }
+    });
+    child.stdin?.on('error', () => { /* stdout/close reports the real reason */ });
+    child.on?.('error', () => {
+      if (worker === state) worker = null;
+      workerFailPending('Local speech recognition is not available — run the STT setup step first.');
+    });
+    child.on?.('close', () => {
+      if (worker === state) worker = null;
+      workerFailPending('Speech recogniser stopped before replying.');
+    });
+    return state;
+  }
+
+  function workerTranscribe(session, pcm, startedAt) {
+    try {
+      if (!worker) startWorker();
+    } catch (error) {
+      finish(session, {
+        status: 'unavailable',
+        error: error?.code === 'ENOENT'
+          ? 'Local speech recognition is not available — run the STT setup step first.'
+          : `Speech recognition failed to start: ${error?.message ?? error}`,
+        ms: now() - startedAt,
+      });
+      return;
+    }
+    touchWorkerIdle();
+    const id = ++workerSeq;
+    workerPending = { session, id, startedAt };
+    session.timer = setTimeout(() => {
+      if (session.settled) return;
+      session.timedOut = true;
+      const pending = workerPending;
+      workerPending = null;
+      stopWorker();
+      if (pending?.session === session) {
+        finish(session, {
+          status: 'error',
+          error: `Transcription timed out after ${Math.round(timeoutMs / 1000)}s and was stopped.`,
+          ms: now() - startedAt,
+        });
+      }
+    }, timeoutMs);
+    try {
+      worker.child.stdin.write(`${JSON.stringify({ id, bytes: pcm.length })}\n`);
+      worker.child.stdin.write(pcm);
+    } catch {
+      stopWorker();
+    }
+  }
+
   return {
     /** True while a recogniser subprocess is live. */
     busy() {
@@ -286,6 +539,17 @@ export function createSttService({
 
     /** Abort the live transcription; its promise rejects with STT_CANCELLED. */
     cancel() {
+      if (persistent) {
+        if (!workerPending) return false;
+        const pending = workerPending;
+        workerPending = null;
+        if (pending.session.timer) clearTimeout(pending.session.timer);
+        pending.session.settled = true;
+        flight = null;
+        stopWorker();
+        pending.session.reject(micErrorLike('STT_CANCELLED', 'Transcription was cancelled.'));
+        return true;
+      }
       if (!flight) return false;
       flight.cancelled = true;
       killChild(flight, 'SIGTERM');
@@ -310,18 +574,17 @@ export function createSttService({
       const promise = new Promise((resolve, reject) => { session.resolve = resolve; session.reject = reject; });
       flight = session;
 
+      if (persistent) {
+        workerTranscribe(session, pcm, startedAt);
+        return promise;
+      }
+
       const stdoutBuffer = [];
       let child;
-      const hasCudaLibs = typeof cudaLibsExist === 'function' ? Boolean(cudaLibsExist()) : Boolean(cudaLibsExist);
       try {
         child = spawnImpl(venvPython, ['-c', buildTranscribeScript(model), model], {
           stdio: ['pipe', 'pipe', 'pipe'],
-          env: {
-            ...env,
-            HUGGINGFACE_HUB_CACHE: resolveSttModelDir(env),
-            SPARKIEE_STT_MODEL: model,
-            ...(hasCudaLibs ? { LD_LIBRARY_PATH: cudaLibraryPath(cudaLibsDir, env) } : {}),
-          },
+          env: recogniserEnv(),
         });
       } catch (error) {
         finish(session, {
@@ -408,7 +671,9 @@ export function createSttService({
 
     /** Leave nothing running behind shutdown/cancel. */
     dispose() {
+      disposed = true;
       this.cancel();
+      stopWorker();
       if (flight) {
         flight.settled = true;
         flight = null;

@@ -546,7 +546,10 @@ export function createSparkieeServer({
 
   if (assistantService?.attachExecutor) {
     if (!sttService) {
-      sttService = createSttService({ model: resolveSttModel({ env: process.env }) });
+      sttService = createSttService({
+        model: resolveSttModel({ env: process.env }),
+        persistent: true, // keep the model/CUDA context warm between utterances
+      });
     }
     assistantService.attachExecutor({
       transcribe: ({ pcm, sampleRate } = {}) => sttService.transcribe({ pcm, sampleRate }),
@@ -1540,5 +1543,14 @@ export function createSparkieeServer({
   server.requestTimeout = 10_000;
   server.headersTimeout = 5_000;
   server.keepAliveTimeout = 2_000;
+  // The resident recogniser must not outlive the HTTP server.
+  server.on('close', () => {
+    try {
+      sttService?.dispose?.();
+    } catch {
+      // best effort during shutdown
+    }
+  });
+
   return server;
 }

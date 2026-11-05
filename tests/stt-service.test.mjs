@@ -331,13 +331,25 @@ test('createSttService: injects the shared CUDA library path when that dir exist
   const svc = createSttService({
     venvPython: '/fake/venv/bin/python',
     cudaLibsDir: '/shared/cuda-libs',
-    cudaLibsExist: true,
+    cudaLibsExist: () => true,
     spawnImpl: (bin, args, opts) => { captured.env = opts?.env; setImmediate(() => c.respond()); return c; },
   });
   await svc.transcribe({ pcm: pcmBytes(600) });
   const ld = captured.env?.LD_LIBRARY_PATH ?? '';
   assert.ok(ld.includes('/shared/cuda-libs/nvidia/cublas/lib'), ld);
   assert.ok(ld.includes('/shared/cuda-libs/nvidia/cudnn/lib'), ld);
+
+  // Boolean form must behave identically (guards against ternary-spread bugs).
+  const capturedBool = {};
+  const c2 = fakeChild({ output: JSON.stringify({ text: 'x', source: 'int16le:16000', segments: [] }) });
+  const svcBool = createSttService({
+    venvPython: '/fake/venv/bin/python',
+    cudaLibsDir: '/shared/cuda-libs',
+    cudaLibsExist: true,
+    spawnImpl: (bin, args, opts) => { capturedBool.env = opts?.env; setImmediate(() => c2.respond()); return c2; },
+  });
+  await svcBool.transcribe({ pcm: pcmBytes(600) });
+  assert.ok((capturedBool.env?.LD_LIBRARY_PATH ?? '').includes('/shared/cuda-libs/nvidia/cublas/lib'));
 });
 
 test('createSttService: leaves LD_LIBRARY_PATH alone when the shared dir is absent', async () => {
@@ -350,4 +362,100 @@ test('createSttService: leaves LD_LIBRARY_PATH alone when the shared dir is abse
   });
   await svc.transcribe({ pcm: pcmBytes(600) });
   assert.equal(captured.env?.LD_LIBRARY_PATH, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Resident recogniser: load the model once, reuse it across utterances.
+// ---------------------------------------------------------------------------
+
+function fakeWorker({ answer = (header) => ({ id: header.id, text: 'hello', source: 'int16le:16000', segments: [] }) } = {}) {
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.killed = false;
+  child.requests = [];
+  child.kills = 0;
+  let pendingHeader = null;
+  child.stdin = new EventEmitter();
+  child.stdin.writable = true;
+  child.stdin.write = (chunk) => {
+    const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+    if (pendingHeader === null) {
+      pendingHeader = JSON.parse(text.trim());
+      return;
+    }
+    const header = pendingHeader;
+    pendingHeader = null;
+    child.requests.push({ header, pcm: Buffer.isBuffer(chunk) ? chunk : Buffer.from(text) });
+    setImmediate(() => child.stdout.emit('data', `${JSON.stringify(answer(header))}\n`));
+  };
+  child.stdout = new EventEmitter();
+  child.stdout.setEncoding = () => {};
+  child.stderr = new EventEmitter();
+  child.kill = () => { child.kills += 1; child.exitCode = 0; child.emit('close', 0, 'SIGTERM'); };
+  return child;
+}
+
+test('persistent: two utterances reuse ONE recogniser process (no per-call model load)', async () => {
+  const child = fakeWorker();
+  let spawns = 0;
+  const svc = createSttService({
+    persistent: true,
+    venvPython: '/fake/venv/bin/python',
+    spawnImpl: () => { spawns += 1; return child; },
+  });
+  const first = await svc.transcribe({ pcm: pcmBytes(600) });
+  const second = await svc.transcribe({ pcm: pcmBytes(600) });
+  assert.equal(spawns, 1, 'worker spawned once and reused');
+  assert.equal(first.text, 'hello');
+  assert.equal(second.text, 'hello');
+  assert.equal(child.requests.length, 2);
+  svc.dispose();
+});
+
+test('persistent: timeout kills the worker; the next utterance starts a fresh one', async () => {
+  const silent = fakeWorker();
+  silent.stdin.write = () => {}; // never answers
+  let spawns = 0;
+  const svc = createSttService({
+    persistent: true,
+    venvPython: '/fake/venv/bin/python',
+    timeoutMs: 60,
+    spawnImpl: () => { spawns += 1; return spawns === 1 ? silent : fakeWorker(); },
+  });
+  const timedOut = await svc.transcribe({ pcm: pcmBytes(600) });
+  assert.equal(timedOut.status, 'error');
+  assert.match(timedOut.error, /timed out/i);
+  assert.ok(silent.kills >= 1, 'stuck worker is killed');
+  const recovered = await svc.transcribe({ pcm: pcmBytes(600) });
+  assert.equal(recovered.status, 'ok');
+  assert.equal(spawns, 2);
+  svc.dispose();
+});
+
+test('persistent: cancel rejects the in-flight utterance and stops the worker', async () => {
+  const silent = fakeWorker();
+  silent.stdin.write = () => {};
+  const svc = createSttService({
+    persistent: true,
+    venvPython: '/fake/venv/bin/python',
+    spawnImpl: () => silent,
+  });
+  const pending = svc.transcribe({ pcm: pcmBytes(600) });
+  assert.equal(svc.cancel(), true);
+  await assert.rejects(pending, /STT_CANCELLED|was cancelled/);
+  assert.ok(silent.kills >= 1);
+  svc.dispose();
+});
+
+test('persistent: recogniser error payload maps to an honest error result', async () => {
+  const failing = fakeWorker({ answer: (header) => ({ id: header.id, error: 'cublas exploded' }) });
+  const svc = createSttService({
+    persistent: true,
+    venvPython: '/fake/venv/bin/python',
+    spawnImpl: () => failing,
+  });
+  const result = await svc.transcribe({ pcm: pcmBytes(600) });
+  assert.equal(result.status, 'error');
+  assert.match(result.error, /cublas exploded/);
+  svc.dispose();
 });
