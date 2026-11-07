@@ -1383,8 +1383,13 @@ test('the first summon uses the full greeting and later summons stay brief', asy
 test('a spoken turn waits for the reply, then reopens the mic without a greeting', async () => {
   const assistantService = assistantEndpointStub();
   const timers = [];
+  const duckCalls = { duck: 0, unduck: 0 };
   const instance = await startServer({
     assistantService,
+    musicService: {
+      duckForSpeech: () => { duckCalls.duck += 1; },
+      unduck: () => { duckCalls.unduck += 1; },
+    },
     setTimeoutImpl: (fn, ms) => { const timer = { fn, ms, cancelled: false }; timers.push(timer); return timer; },
     clearTimeoutImpl: (timer) => { if (timer) timer.cancelled = true; },
     followUpGraceMs: 250,
@@ -1398,6 +1403,7 @@ test('a spoken turn waits for the reply, then reopens the mic without a greeting
     });
     assert.equal(start.status, 200);
     assert.equal(assistantService.startCalls, 1);
+    assert.equal(duckCalls.duck, 1, 'music ducks while the first mic window is live');
     await assistantService.stopPtt(); // leave the fake mic, keep the conversation active
 
     const turn = assistantService.turnHandler({
@@ -1414,5 +1420,13 @@ test('a spoken turn waits for the reply, then reopens the mic without a greeting
     followUp.fn();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(assistantService.startCalls, 2, 'mic reopened for a second turn');
+    assert.equal(duckCalls.duck, 2, 'music stays ducked during the follow-up window');
+    const reset = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/conversation/reset`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` },
+      body: '{}',
+    });
+    assert.equal(reset.status, 200);
+    assert.equal(duckCalls.unduck, 1, 'ending the conversation restores music');
   } finally { await close(instance.server); }
 });

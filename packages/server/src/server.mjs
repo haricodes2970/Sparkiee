@@ -183,6 +183,23 @@ export function createSparkieeServer({
     endReason: null,
   };
   const handledTurns = new WeakSet();
+  let conversationDuckActive = false;
+
+  /**
+   * Keep music under the microphone, not only under text-to-speech. The duck
+   * lease is renewed for each turn; ending the session restores the level.
+   */
+  function duckForConversation() {
+    if (!musicService?.duckForSpeech) return;
+    conversationDuckActive = true;
+    musicService.duckForSpeech(15_000);
+  }
+
+  function unduckForConversation() {
+    if (!conversationDuckActive) return;
+    conversationDuckActive = false;
+    musicService?.unduck?.();
+  }
 
   function clearFollowUpTimer() {
     if (voiceConversation.followUpTimer !== null) {
@@ -195,12 +212,14 @@ export function createSparkieeServer({
     clearFollowUpTimer();
     voiceConversation.active = true;
     voiceConversation.endReason = null;
+    duckForConversation();
   }
 
   function endVoiceConversation(reason = 'idle') {
     clearFollowUpTimer();
     voiceConversation.active = false;
     voiceConversation.endReason = reason;
+    unduckForConversation();
   }
 
   function resetVoiceConversation() {
@@ -237,6 +256,7 @@ export function createSparkieeServer({
     voiceConversation.followUpTimer = setTimeoutImpl(() => {
       voiceConversation.followUpTimer = null;
       if (!voiceConversation.active) return;
+      duckForConversation(); // renew the lease for the listening window
       Promise.resolve(assistantService.startPtt({ durationMs: followUpListenMs }))
         .catch((error) => {
           if (error?.code === 'MIC_BUSY') return; // a manual turn already owns the mic
@@ -261,6 +281,7 @@ export function createSparkieeServer({
       closing: out.conversationDone === true,
     });
     if (!decision.continue) {
+      if (decision.reason === 'closing') await waitForReplyPlayback(out);
       endVoiceConversation(decision.reason);
       return;
     }

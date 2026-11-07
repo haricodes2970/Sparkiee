@@ -500,6 +500,7 @@ async function main() {
       playbackStatus: () => musicPlayerRuntime.status(),
       searchRanked: (query, options) => musicLibrary.searchRanked(query, options),
       duckForSpeech: (durationMs) => musicPlayerRuntime.duck({ durationMs }),
+      unduck: () => musicPlayerRuntime.unduck(),
       play: (options) => musicPlayerRuntime.play(options),
       pause: () => musicPlayerRuntime.pause(),
       resume: () => musicPlayerRuntime.resume(),
