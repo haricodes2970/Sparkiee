@@ -1430,3 +1430,56 @@ test('a spoken turn waits for the reply, then reopens the mic without a greeting
     assert.equal(duckCalls.unduck, 1, 'ending the conversation restores music');
   } finally { await close(instance.server); }
 });
+
+test('mapped project commands open a terminal locally without a chat call', async () => {
+  let chatCalls = 0;
+  const opened = [];
+  const instance = await startServer({
+    musicService: assistantServiceStub(),
+    assistantThrottleMs: 0,
+    projectRegistry: {
+      resolve: async (name) => name.toLowerCase() === 'dj' ? { name: 'DJ', path: '/tmp/dj' } : null,
+      list: async () => [{ name: 'DJ', path: '/tmp/dj' }],
+    },
+    systemLauncher: {
+      openProject: async (options) => { opened.push(options); return { ok: true, terminal: 'ptyxis', pid: 1 }; },
+    },
+    chatProvider: {
+      configured: () => true,
+      describe: () => ({ provider: 'test', label: 'Test', model: 'test' }),
+      chat: async () => { chatCalls += 1; return { ok: true, text: 'should not happen' }; },
+    },
+  });
+  try {
+    const post = (text) => fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` },
+      body: JSON.stringify({ text }),
+    });
+
+    const openedResponse = await post('Yo Spark, open project DJ in the console and give command open code');
+    const openedBody = await openedResponse.json();
+    assert.equal(openedBody.intent, 'project_run');
+    assert.equal(openedBody.executed, true);
+    assert.deepEqual(opened, [{ path: '/tmp/dj', command: 'code .' }]);
+    assert.match(openedBody.reply, /DJ/);
+    assert.equal(chatCalls, 0);
+
+    const unknown = await (await post('open project Ghost')).json();
+    assert.equal(unknown.executed, false);
+    assert.match(unknown.reply, /DJ/);
+    assert.equal(opened.length, 1, 'unknown project never spawns');
+    assert.equal(chatCalls, 0);
+
+    const unsafe = await (await post('run rm -rf / in project DJ')).json();
+    assert.equal(unsafe.intent, 'project_invalid');
+    assert.equal(unsafe.executed, false);
+    assert.equal(opened.length, 1, 'unsafe command never spawns');
+    assert.equal(chatCalls, 0);
+
+    const listed = await fetch(`http://127.0.0.1:${instance.port}/api/v1/projects`, {
+      headers: { authorization: `Bearer ${instance.token}` },
+    });
+    assert.deepEqual(await listed.json(), { ok: true, projects: [{ name: 'DJ', path: '/tmp/dj' }], configured: true });
+  } finally { await close(instance.server); }
+});

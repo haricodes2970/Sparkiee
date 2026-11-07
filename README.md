@@ -61,14 +61,20 @@ sparkiee voice unmute
 ~~~
 
 The chat assistant uses Groq or Google AI Studio (one key, entered through
-a hidden prompt and stored owner-only). Music commands are parsed locally.
-To have Sparky nap on the OpenCode prompt and track task start/completion:
+a hidden prompt and stored owner-only). Music commands are parsed locally,
+and v1.1 keeps the microphone open for follow-up turns with music ducked
+while you speak. Mapping a project folder makes console commands local too:
 
 ~~~bash
 sparkiee assistant setup --provider groq   # or --provider google
+sparkiee project add DJ ~/Projects/DJ
+sparkiee project open DJ --run "npm test"
 sparkiee pet dock                          # drag the sleeping pet to refine
 sparkiee pet status
 ~~~
+
+See [the companion update notes](docs/COMPANION_UPDATE.md) for the
+conversation loop, ducking, project safety rules, and spoken phrases.
 
 To add your own pack, create `~/.local/share/sparkiee/characters/<id>/`
 with a `manifest.json` (schema validated by
@@ -104,6 +110,7 @@ sparkiee stop
 sparkiee voice status | setup | test | mute | unmute
 sparkiee assistant setup --provider groq|google | status | stt-setup
 sparkiee pet dock | undock | sleep | wake | status
+sparkiee project list | add | remove | open | run | file
 sparkiee --help
 sparkiee --version
 ~~~
@@ -123,6 +130,8 @@ The Electron dependency downloads a platform-specific desktop runtime during npm
 - GOOGLE_AI_API_KEY: optional Google AI Studio chat key (alias `GEMINI_API_KEY`).
 - SPARKIEE_CHAT_LOCAL_ONLY=1: block all outbound chat requests.
 - SPARKIEE_MUSIC_ROOTS: colon-separated music directories to scan (default `~/Music`).
+- SPARKIEE_PROJECTS_FILE: override the project registry path.
+- TERMINAL: preferred terminal binary for local project commands.
 
 ## Security principles
 
@@ -130,7 +139,11 @@ The Electron dependency downloads a platform-specific desktop runtime during npm
 - Per-install runtime token stored in the user's local state directory with restrictive permissions.
 - Token-protected pet-host API calls and shutdown endpoint.
 - Same-origin check and strict payload validation for dashboard pet commands.
-- No arbitrary shell command endpoint, remote analytics, or cloud requirement.
+- No arbitrary shell command endpoint: only an explicit project command from
+  the deterministic parser can open a terminal, limited to developer
+  binaries and rejected on shell metacharacters. Chat text is never executed.
+- No remote analytics or cloud requirement for local music, project, voice,
+  or system actions.
 - No automated approval of coding-agent permissions.
 - Chat keys (Groq / Google AI Studio) live only in the daemon: stored
   with 0600 permissions under the user config directory (or the

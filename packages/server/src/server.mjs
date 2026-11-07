@@ -11,6 +11,7 @@ import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLi
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 import { parseMusicIntent, runMusicCommand } from '../../core/src/music-commands.mjs';
 import { conversationDecision, isClosingPhrase, nextGreeting, FOLLOW_UP_MS } from '../../core/src/conversation.mjs';
+import { parseSystemIntent } from '../../core/src/system-commands.mjs';
 import { CHAT_ERROR_MESSAGES } from '../../core/src/chat-client.mjs';
 import { createGnomeHotkeyInstaller } from '../../core/src/gnome-hotkey.mjs';
 import { createSttService, probeSttSetup, resolveSttModel } from '../../core/src/stt-service.mjs';
@@ -165,6 +166,8 @@ export function createSparkieeServer({
   followUpGraceMs = 250,
   setTimeoutImpl = (fn, ms) => setTimeout(fn, ms),
   clearTimeoutImpl = (id) => clearTimeout(id),
+  projectRegistry = null,
+  systemLauncher = null,
 }) {
   let shutdownRequested = false;
   const commandSpeechSpokeAt = new Map(); // voiceEvent -> timestamp
@@ -424,8 +427,8 @@ export function createSparkieeServer({
     'You are Sparky, a small friendly desktop assistant living on the user\'s screen.',
     'Reply in one or two short, plain spoken sentences. No markdown, no lists, no code,',
     'no emoji, no stage directions. If you do not know something, say so plainly.',
-    'You cannot run commands, open applications, or control music — the user does that',
-    'with their own shortcuts, so never claim to have done it.',
+    'Local music and mapped project/console actions are handled by the app before text',
+    'reaches you. Never claim you executed one yourself, and never invent a result.',
   ].join(' ');
   let chatHistory = [];
   let lastChatError = null;
@@ -518,6 +521,59 @@ export function createSparkieeServer({
   }
 
   /**
+   * Execute a local project/console intent. Unknown projects and unsafe
+   * commands are answered honestly without spawning anything or calling chat.
+   */
+  async function runSystemIntent(systemIntent, text) {
+    const playback = () => (musicService?.playbackStatus ? musicService.playbackStatus() : null);
+    const finish = async (reply, executed, extra = {}) => {
+      const speech = await speakAssistantReply(reply);
+      recordAssistantAction({
+        kind: 'command', text: String(text ?? ''), intent: systemIntent.intent,
+        reply, executed: Boolean(executed), ...extra,
+      });
+      return {
+        handled: true, intent: systemIntent.intent, reply, executed: Boolean(executed),
+        speech, playback: playback(), ...extra,
+      };
+    };
+
+    if (systemIntent.intent === 'project_invalid') {
+      return finish('I can only run developer commands like npm, opencode, code, or git. Nothing was opened.', false, { project: systemIntent.project });
+    }
+    if (!projectRegistry || !systemLauncher) {
+      return finish('Project control is not configured in this runtime.', false);
+    }
+    let project;
+    try {
+      project = await projectRegistry.resolve(systemIntent.project);
+    } catch {
+      return finish('I could not read the project registry. Nothing was opened.', false);
+    }
+    if (!project) {
+      let known = [];
+      try { known = await projectRegistry.list(); } catch { /* reply without names */ }
+      const names = known.map((entry) => entry.name);
+      const reply = names.length > 0
+        ? `I do not know the project "${systemIntent.project}". Known projects: ${names.join(', ')}.`
+        : `I do not know the project "${systemIntent.project}". No projects are mapped yet; add one with "sparkiee project add".`;
+      return finish(reply, false);
+    }
+    try {
+      await systemLauncher.openProject({ path: project.path, command: systemIntent.command });
+    } catch (error) {
+      const reply = error?.code === 'TERMINAL_UNAVAILABLE'
+        ? 'I could not find a terminal to open. Set the TERMINAL environment variable and try again.'
+        : `I could not open ${project.name}: ${error?.message?.slice(0, 140) ?? 'unknown error'}`;
+      return finish(reply, false, { project: project.name });
+    }
+    const reply = systemIntent.command
+      ? `Opening ${project.name} and running ${systemIntent.command}.`
+      : `Opening ${project.name} in the console.`;
+    return finish(reply, true, { project: project.name, command: systemIntent.command });
+  }
+
+  /**
    * The ONE text→action path. Used by the typed-command endpoint and by the
    * PTT transcript pipeline: every route runs the same parsing, throttling
    * policy, voice gate and action ledger, so speech and typing can never
@@ -526,6 +582,8 @@ export function createSparkieeServer({
   async function runTextCommand(text) {
     const intent = parseMusicIntent(text);
     if (!intent) {
+      const systemIntent = parseSystemIntent(text);
+      if (systemIntent) return runSystemIntent(systemIntent, text);
       // Explicit goodbyes are a local policy decision: never spent on a chat
       // call, and never mistaken for the music "stop" command.
       if (isClosingPhrase(text)) {
@@ -1232,9 +1290,27 @@ export function createSparkieeServer({
       }
       return;
     }
+    if (method === 'GET' && pathname === '/api/v1/projects') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      if (!projectRegistry) {
+        sendJson(response, 200, { ok: true, projects: [], configured: false });
+        return;
+      }
+      try {
+        const projects = await projectRegistry.list();
+        sendJson(response, 200, { ok: true, projects, configured: true });
+      } catch {
+        sendJson(response, 500, { error: 'The project registry could not be read.' });
+      }
+      return;
+    }
     // -------------------------------------------------------------------------
-    // Assistant: deterministic text-command routing (music first) then, only
-    // for text that is NOT a music command, one conversational turn with the
+    // Assistant: deterministic text-command routing (music first, then local
+    // project/console actions) then, only for other text, one chat turn with
+    // the configured provider.
     // configured chat provider. Auth-gated because commands change player
     // state and may spend TTS credits. When no chat model is configured the
     // text is never sent anywhere — the reply is an honest explanation.

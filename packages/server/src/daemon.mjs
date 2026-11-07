@@ -16,6 +16,8 @@ import { createPiperTts } from '../../core/src/piper-tts.mjs';
 import { loadChatConfig, describeChatConfig, CHAT_PROVIDER_INFO } from '../../core/src/chat-config.mjs';
 import { createChatClient } from '../../core/src/chat-client.mjs';
 import { withoutSecrets } from '../../core/src/env-safety.mjs';
+import { createProjectRegistry } from '../../core/src/project-registry.mjs';
+import { createSystemLauncher } from '../../core/src/system-launcher.mjs';
 import { createVoiceService } from './voice-service.mjs';
 import { createAssistantService } from './assistant-service.mjs';
 import { createHotkeyState } from '../../core/src/voice-hotkey.mjs';
@@ -25,6 +27,8 @@ import { createMusicPlayer } from '../../core/src/music-player.mjs';
 import { CHARACTER_ROOTS, createPackDetailProvider } from './pack-detail.mjs';
 
 const paths = resolveRuntimePaths();
+const projectRegistry = createProjectRegistry({ env: process.env });
+const systemLauncher = createSystemLauncher({ env: process.env });
 const port = resolvePort();
 const host = '127.0.0.1';
 const require = createRequire(import.meta.url);
@@ -511,6 +515,8 @@ async function main() {
     },
     voiceService,
     assistantService,
+    projectRegistry,
+    systemLauncher,
     chatProvider: createChatProvider(),
     refreshChatConfig: () => refreshChatConfig(),
     hotkey,

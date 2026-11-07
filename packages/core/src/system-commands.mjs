@@ -36,7 +36,6 @@ const OPEN_IN_CONSOLE = /^(?:open|launch|show)\s+(.+?)\s+(?:in|on)\s+(?:the\s+)?
 const OPEN_AND_RUN = /^(?:open|launch|show)\s+(.+?)\s+and\s+(?:give|run|execute|send)(?:\s+the)?\s+command\s+(.+)$/;
 const RUN_COMMAND_IN = /^(?:run|execute)\s+(?:the\s+)?command\s+(.+?)\s+in\s+(?:the\s+)?project\s+(.+)$/;
 const RUN_IN = /^(?:run|execute)\s+(.+?)\s+in\s+(?:the\s+)?(?:project\s+)?(.+?)(?:\s+(?:console|terminal))?$/;
-const OPEN = /^(?:open|launch|show)\s+(?:the\s+)?(.+)$/;
 
 const GENERIC_TARGETS = new Set([
   'terminal', 'console', 'project', 'the', 'a', 'an', 'folder', 'directory',
@@ -116,12 +115,5 @@ export function parseSystemIntent(text) {
   match = normalized.match(RUN_IN);
   if (match) return result('project_run', match[2], match[1]);
 
-  match = normalized.match(OPEN);
-  if (match) {
-    const project = cleanProject(match[1]);
-    // "open project DJ" without the project keyword is still useful, but
-    // generic words like "open a terminal" must remain chat, not a project.
-    if (project) return result('project_open', project, null);
-  }
   return null;
 }

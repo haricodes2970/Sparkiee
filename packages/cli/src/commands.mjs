@@ -24,6 +24,7 @@ import {
 } from '../../core/src/voice-config.mjs';
 import { createPiperTts } from '../../core/src/piper-tts.mjs';
 import { formatTaskDuration } from '../../core/src/pet-state.mjs';
+import { createProjectRegistry } from '../../core/src/project-registry.mjs';
 import { setupPiperEnvironment, DEFAULT_VOICE_SETUP_TIMEOUT_MS } from '../../core/src/tts-setup.mjs';
 import {
   CHAT_PROVIDERS,
@@ -104,6 +105,15 @@ Commands:
   pet sleep    Put Sparky to sleep where she is
   pet wake     Wake Sparky without moving her
   pet status   Show dock posture and the tracked task timer
+  project list Show locally mapped project folders
+  project add <name> [path]
+               Map a project name to a folder (defaults to the current dir)
+  project remove <name>
+               Forget a mapped project
+  project open <name> [--run <command>]
+               Open the project in a terminal and optionally run a dev command
+  project run <name> <command...>
+               Open the project and run a local developer command
   voice status Show whether Sparky's spoken voice is configured
   voice setup  Install the free local voice (Piper) and download voice models
   voice test   Speak a short test phrase on the desktop pet
@@ -982,6 +992,74 @@ async function assistantReset(env) {
   process.stdout.write(`Conversation reset — ${payload.cleared ?? 0} stored message(s) forgotten.\n`);
 }
 
+async function projectOpen(env, name, command) {
+  if (!name) throw new Error('Usage: sparkiee project open <name> [--run <command>]');
+  const { port, token } = await requireDaemon(env);
+  const text = command ? `open project ${name} and run ${command}` : `open project ${name}`;
+  const { response, payload } = await fetchJson(`http://${DEFAULT_HOST}:${port}/api/v1/assistant/command`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) throw new Error(payload?.error ?? `Project command failed with HTTP ${response.status}.`);
+  if (payload?.reply) process.stdout.write(`${payload.reply}\n`);
+  if (payload?.executed !== true) process.exitCode = 1;
+}
+
+async function runProjectCommand(subcommand, args, env) {
+  const registry = createProjectRegistry({ env });
+  switch (subcommand) {
+    case 'list':
+    case 'status': {
+      const projects = await registry.list();
+      if (projects.length === 0) {
+        process.stdout.write('No projects mapped yet. Add one with "sparkiee project add <name> <path>".\n');
+        return;
+      }
+      for (const project of projects) process.stdout.write(`${project.name.padEnd(20)} ${project.path}\n`);
+      return;
+    }
+    case 'add': {
+      const name = args[0];
+      if (!name) throw new Error('Usage: sparkiee project add <name> [path]');
+      const target = path.resolve(args[1] ?? process.cwd());
+      const saved = await registry.add({ name, path: target });
+      process.stdout.write(`Mapped project "${saved.name}" -> ${saved.path}\n`);
+      return;
+    }
+    case 'remove':
+    case 'rm': {
+      const name = args[0];
+      if (!name) throw new Error('Usage: sparkiee project remove <name>');
+      const removed = await registry.remove(name);
+      if (!removed) throw new Error(`Project "${name}" is not mapped.`);
+      process.stdout.write(`Removed project "${name}".\n`);
+      return;
+    }
+    case 'open': {
+      const name = args[0];
+      let command = null;
+      const runAt = args.indexOf('--run');
+      if (runAt >= 0) command = args.slice(runAt + 1).join(' ') || null;
+      await projectOpen(env, name, command);
+      return;
+    }
+    case 'run': {
+      const name = args[0];
+      const command = args.slice(1).join(' ');
+      if (!name || !command) throw new Error('Usage: sparkiee project run <name> <command...>');
+      await projectOpen(env, name, command);
+      return;
+    }
+    case 'file':
+      process.stdout.write(`${registry.file}\n`);
+      return;
+    default:
+      throw new Error(`Unknown project command "${subcommand}". Try: project list | add | remove | open | run | file.`);
+  }
+}
+
 async function runVoiceCommand(subcommand, args, env) {
   switch (subcommand) {
     case 'status':
@@ -1016,6 +1094,10 @@ export async function runCli(argv, env = process.env) {
   }
   if (command === 'pet') {
     await petCommand(argv[1] ?? 'status', env);
+    return;
+  }
+  if (command === 'project') {
+    await runProjectCommand(argv[1] ?? 'list', argv.slice(2), env);
     return;
   }
   if (command === 'ptt' && argv[1] === 'toggle') {
