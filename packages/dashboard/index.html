@@ -71,7 +71,7 @@
             <article class="stat-card"><div class="stat-top"><span class="stat-label">RUNTIME</span><span class="stat-icon purple" aria-hidden="true">⌘</span></div><div id="runtime-state" class="stat-value">Checking…</div><div id="runtime-caption" class="stat-caption">Connecting to local service</div></article>
             <article class="stat-card"><div class="stat-top"><span class="stat-label">DASHBOARD</span><span class="stat-icon blue" aria-hidden="true">↗</span></div><div class="stat-value">Port <span id="runtime-port">2005</span></div><div class="stat-caption">Bound to 127.0.0.1 only</div></article>
             <article class="stat-card"><div class="stat-top"><span class="stat-label">PET HOST</span><span class="stat-icon amber" aria-hidden="true">✦</span></div><div id="pet-host-stat" class="stat-value">Checking…</div><div id="pet-host-caption" class="stat-caption">Waiting for desktop pet</div><button type="button" id="retry-host" class="secondary-action host-retry" hidden>Retry launch</button></article>
-            <article class="stat-card"><div class="stat-top"><span class="stat-label">SPOKEN VOICE</span><span class="stat-icon mint" aria-hidden="true">♪</span></div><div id="voice-stat" class="stat-value">Checking…</div><div id="voice-stat-caption" class="stat-caption">ElevenLabs provider status</div></article>
+            <article class="stat-card"><div class="stat-top"><span class="stat-label">SPOKEN VOICE</span><span class="stat-icon mint" aria-hidden="true">♪</span></div><div id="voice-stat" class="stat-value">Checking…</div><div id="voice-stat-caption" class="stat-caption">Local Piper engine</div></article>
           </section>
 
           <section class="section-heading">
@@ -81,6 +81,7 @@
             <div class="now-row"><span class="now-label">ANIMATION</span><strong id="overview-animation">Hanging out</strong></div>
             <div class="now-row"><span class="now-label">CAPTION</span><p id="overview-caption">No caption yet — Sparky is saving her voice.</p></div>
             <div class="now-row"><span class="now-label">VOICE</span><span id="overview-voice-state">Checking voice provider…</span></div>
+            <div class="now-row"><span class="now-label">OPENCODE</span><span id="overview-task-state">No task tracked yet</span></div>
           </section>
 
           <section class="section-heading" id="activity">
@@ -141,6 +142,10 @@
                     <input type="checkbox" id="auto-roam" checked />
                     <span>Auto-roam while idle</span>
                   </label>
+                  <label class="movement-setting roam-setting" for="quiet-mode">
+                    <input type="checkbox" id="quiet-mode" />
+                    <span>Quiet mode — no reactions to agent events</span>
+                  </label>
                 </div>
                 <div class="action-heading reaction-heading"><span>REACTIONS</span><span class="action-hint">Agent-style cues</span></div>
                 <div class="emote-grid">
@@ -166,7 +171,7 @@
                   <output id="audio-volume-value" for="audio-volume">70%</output>
                 </label>
                 <button type="button" id="test-sound" class="secondary-action">▶ Test chirp</button>
-                <div class="voice-subheading">SPOKEN VOICE · ELEVENLABS</div>
+                <div class="voice-subheading">SPOKEN VOICE · LOCAL PIPER</div>
                 <div class="voice-provider-row">
                   <span id="voice-provider-dot" class="footer-dot"></span>
                   <span id="voice-provider-text">Checking voice provider…</span>
@@ -234,6 +239,7 @@
 
               <div class="panel-heading"><div><div class="eyebrow">PRESENTATION</div><h2>Where Sparky lives</h2></div></div>
               <div class="pet-visibility-controls"><span id="pet-visibility-text">Pet visibility</span><div><button type="button" id="show-pet" class="secondary-action" data-pet-command="show">Summon pet</button><button type="button" id="hide-pet" class="secondary-action" data-pet-command="hide">Hide pet</button></div></div>
+              <div class="pet-visibility-controls"><span id="dock-state-text">Dock: desktop</span><div><button type="button" id="dock-pet" class="secondary-action">Dock on OpenCode</button><button type="button" id="undock-pet" class="secondary-action">Undock</button><button type="button" id="wake-pet" class="secondary-action">Wake</button></div></div>
               <div class="pet-visibility-controls habitat-controls"><span id="habitat-owner-text">Presentation: desktop window</span><div><button type="button" id="bring-to-habitat" class="secondary-action">Bring Sparky here</button><button type="button" id="send-to-desktop" class="secondary-action" disabled>Send to desktop</button></div></div>
               <div class="command-feedback" id="command-feedback" role="status" aria-live="polite">Ready for an emote.</div>
               <div class="runtime-note"><span class="note-icon" aria-hidden="true">i</span><p id="host-note">The desktop pet is a separate process. If it is offline, check the runtime log and confirm the Electron dependency is installed.</p></div>
@@ -265,7 +271,7 @@
               <div><strong>Local only</strong><p>The dashboard and pet API bind to 127.0.0.1:2005. Nothing leaves this machine — no cloud account, no telemetry.</p></div>
             </div>
             <div class="settings-row">
-              <div><strong>Spoken voice</strong><p>ElevenLabs is configured through the CLI, never through browser forms: run <code>sparkiee voice setup</code>, then <code>sparkiee voice test</code>.</p></div>
+              <div><strong>Spoken voice</strong><p>Piper is installed through the CLI, never through browser forms: run <code>sparkiee voice setup</code>, then <code>sparkiee voice test</code>.</p></div>
             </div>
             <div class="settings-row">
               <div><strong>Character packs</strong><p>Switch packs on the Characters page or the Sparky page. Asset credits live in <a href="https://github.com/haricodes2970/Sparkiee/blob/main/docs/ASSET_CREDITS.md" target="_blank" rel="noopener noreferrer">docs/ASSET_CREDITS.md</a>.</p></div>

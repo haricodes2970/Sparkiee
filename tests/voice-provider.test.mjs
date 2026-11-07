@@ -1,124 +1,238 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createElevenLabsClient, isValidUtterance, MAX_UTTERANCE_LENGTH } from '../packages/core/src/tts-client.mjs';
+import { createPiperTts, isValidUtterance, MAX_UTTERANCE_LENGTH, normaliseSpeechText } from '../packages/core/src/piper-tts.mjs';
+import { DEFAULT_VOICES } from '../packages/core/src/voice-config.mjs';
 import { createAudioCache } from '../packages/core/src/audio-cache.mjs';
 import { AGENT_EVENT_REACTIONS, AGENT_EVENT_TYPES, pickLine, VOICE_LINES, VOICE_TEST_PHRASE } from '../packages/core/src/voice-lines.mjs';
 import { createVoiceService, describeSpeechError } from '../packages/server/src/voice-service.mjs';
 import { createPetController } from '../packages/core/src/pet-state.mjs';
 
-const CONFIG = { apiKey: 'sk_test_key_000000000000000000000000', voiceId: 'k7uh1RfFIE9Dn75CNvuX', modelId: 'eleven_flash_v2_5', outputFormat: 'mp3_44100_128' };
+const CONFIG = { engine: 'piper', voices: { ...DEFAULT_VOICES }, speed: 1 };
 
-function toArrayBuffer(buffer) {
-  const b = Buffer.from(buffer);
-  return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+/** A real (tiny) PCM WAV so duration parsing is exercised, not stubbed. */
+export function makeWav({ dataBytes = 4410 } = {}) {
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0, 'ascii');
+  header.writeUInt32LE(36 + dataBytes, 4);
+  header.write('WAVE', 8, 'ascii');
+  header.write('fmt ', 12, 'ascii');
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(22050, 24);
+  header.writeUInt32LE(44100, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36, 'ascii');
+  header.writeUInt32LE(dataBytes, 40);
+  return Buffer.concat([header, Buffer.alloc(dataBytes)]);
 }
 
-function mockResponse({ status = 200, body = null, json = null, bytes = 'ID3audio-bytes' } = {}) {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => (json ?? body),
-    arrayBuffer: async () => toArrayBuffer(bytes),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// TTS client
-// ---------------------------------------------------------------------------
-
-test('synthesize sends the documented ElevenLabs request and returns audio', async () => {
+/**
+ * Fake Piper worker: records the JSON request, writes a WAV to the requested
+ * output path, and replies on stdout exactly like the Python worker does.
+ */
+function fakeWorker({ behavior = 'ok', onRequest = null } = {}) {
   const calls = [];
-  const client = createElevenLabsClient({
-    config: CONFIG,
-    fetchImpl: async (url, options) => {
-      calls.push({ url, options });
-      return mockResponse({ bytes: 'mp3data' });
-    },
-  });
-  const result = await client.synthesize("Hey! I'm Sparky!");
-  assert.equal(result.ok, true);
-  assert.equal(result.mime, 'audio/mpeg');
-  assert.equal(result.audio.toString(), 'mp3data');
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].url, /^https:\/\/api\.elevenlabs\.io\/v1\/text-to-speech\/k7uh1RfFIE9Dn75CNvuX\?output_format=mp3_44100_128$/);
-  assert.equal(calls[0].options.method, 'POST');
-  assert.equal(calls[0].options.headers['xi-api-key'], CONFIG.apiKey);
-  const payload = JSON.parse(calls[0].options.body);
-  assert.equal(payload.text, "Hey! I'm Sparky!");
-  assert.equal(payload.model_id, 'eleven_flash_v2_5');
-  assert.equal(typeof payload.voice_settings.stability, 'number');
-});
+  const children = [];
+  const spawnImpl = (command, args, options) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.killed = false;
+    child.kill = () => { child.killed = true; child.emit('close', 0); };
+    child.stdin = {
+      write(line) {
+        const request = JSON.parse(line);
+        calls.push({ command, args, options, request });
+        onRequest?.(request);
+        if (behavior === 'silent') return;
+        setTimeout(async () => {
+          if (behavior === 'error') {
+            child.stdout.emit('data', `${JSON.stringify({ id: request.id, ok: false, error: 'synthesis exploded' })}\n`);
+            return;
+          }
+          if (behavior === 'empty') {
+            await writeFile(request.out, Buffer.alloc(0));
+          } else {
+            await writeFile(request.out, makeWav());
+          }
+          child.stdout.emit('data', `${JSON.stringify({ id: request.id, ok: true })}\n`);
+        }, 5);
+      },
+      end() {},
+    };
+    children.push(child);
+    return child;
+  };
+  return { spawnImpl, calls, children };
+}
 
-test('the api key never appears in results or error messages', async () => {
-  const client = createElevenLabsClient({
-    config: CONFIG,
-    fetchImpl: async () => mockResponse({ status: 401 }),
+function engineFor({ env = {}, config = CONFIG, exists = () => true, worker = fakeWorker(), timeoutMs = 2_000 } = {}) {
+  const engine = createPiperTts({
+    env: { HOME: '/home/u', XDG_DATA_HOME: '/home/u/.local/share', ...env },
+    spawnImpl: worker.spawnImpl,
+    existsSyncImpl: exists,
+    getConfig: () => config,
+    timeoutMs,
+    idleUnloadMs: 0,
   });
-  const result = await client.synthesize('hello');
-  assert.equal(result.ok, false);
-  assert.equal(result.code, 'auth');
-  assert.ok(!JSON.stringify(result).includes(CONFIG.apiKey));
-  assert.match(result.message, /voice setup/);
-});
+  return { engine, worker };
+}
 
-test('error statuses map to honest, actionable codes', async () => {
-  for (const [status, code] of [[401, 'auth'], [403, 'quota'], [429, 'rate'], [422, 'validation'], [500, 'provider']]) {
-    const client = createElevenLabsClient({ config: CONFIG, fetchImpl: async () => mockResponse({ status }) });
-    const result = await client.synthesize('hello there');
-    assert.equal(result.code, code, `HTTP ${status} -> ${code}`);
-    assert.ok(result.message.length > 10);
+// ---------------------------------------------------------------------------
+// Piper engine
+// ---------------------------------------------------------------------------
+
+test('synth speaks through the resident worker and returns real WAV audio', async () => {
+  const { engine, worker } = engineFor();
+  try {
+    const result = await engine.synthesize('Your task is complete!');
+    assert.equal(result.ok, true);
+    assert.equal(result.provider, 'piper');
+    assert.equal(result.mime, 'audio/wav');
+    assert.equal(result.voiceId, DEFAULT_VOICES.en);
+    assert.ok(result.audio.length > 44, 'real WAV bytes');
+    assert.ok(result.durationMs > 0, 'duration derived from the WAV header');
+    assert.equal(worker.calls.length, 1);
+    assert.match(worker.calls[0].request.model, /en_US-lessac-medium\.onnx$/);
+    assert.equal(worker.calls[0].request.text, 'Your task is complete!');
+    assert.equal(worker.calls[0].options.stdio[0], 'pipe', 'text goes over stdin, never a shell');
+  } finally {
+    await engine.close();
   }
 });
 
-test('timeouts and transport failures are distinguished', async () => {
-  const timeoutClient = createElevenLabsClient({
-    config: CONFIG,
-    fetchImpl: async () => {
-      const error = new Error('aborted');
-      error.name = 'TimeoutError';
-      throw error;
-    },
-  });
-  assert.equal((await timeoutClient.synthesize('hi')).code, 'timeout');
-  const networkClient = createElevenLabsClient({
-    config: CONFIG,
-    fetchImpl: async () => { throw new Error('ECONNREFUSED'); },
-  });
-  assert.equal((await networkClient.synthesize('hi')).code, 'network');
+test('Devanagari text selects the Hindi voice and Latin text the English one', async () => {
+  const { engine, worker } = engineFor();
+  try {
+    await engine.synthesize('नमस्ते, मैं स्पार्की हूँ।');
+    await engine.synthesize('Hello, I am Sparky.');
+    assert.match(worker.calls[0].request.model, /hi_IN-priyamvada-medium\.onnx$/);
+    assert.match(worker.calls[1].request.model, /en_US-lessac-medium\.onnx$/);
+  } finally {
+    await engine.close();
+  }
 });
 
-test('invalid utterances are rejected before any network call', async () => {
-  let called = 0;
-  const client = createElevenLabsClient({ config: CONFIG, fetchImpl: async () => { called += 1; return mockResponse(); } });
-  for (const bad of ['', '   ', 'x'.repeat(MAX_UTTERANCE_LENGTH + 1), 42, null, 'bad\u0000control']) {
-    const result = await client.synthesize(bad);
+test('the configured speed reaches the worker', async () => {
+  const { engine, worker } = engineFor({ config: { ...CONFIG, speed: 1.4 } });
+  try {
+    await engine.synthesize('faster please');
+    assert.equal(worker.calls[0].request.speed, 1.4);
+  } finally {
+    await engine.close();
+  }
+});
+
+test('a missing voice model fails honestly before anything is spawned', async () => {
+  const { engine, worker } = engineFor({ exists: (file) => !file.includes(`${path.sep}voices${path.sep}`) });
+  try {
+    const result = await engine.synthesize('hello');
     assert.equal(result.ok, false);
-    assert.equal(result.code, 'validation');
+    assert.equal(result.code, 'voice_missing');
+    assert.match(result.message, /voice setup/);
+    assert.equal(worker.calls.length, 0, 'no wasted process');
+  } finally {
+    await engine.close();
   }
-  assert.equal(called, 0, 'no request left the machine');
 });
 
-test('client refuses to be constructed without a key', () => {
-  assert.throws(() => createElevenLabsClient({ config: { apiKey: null } }), /configured API key/);
+test('a missing runtime fails with an install instruction', async () => {
+  const { engine, worker } = engineFor({ exists: () => false });
+  try {
+    const result = await engine.synthesize('hello');
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'not_installed');
+    assert.match(result.message, /sparkiee voice setup/);
+    assert.equal(worker.calls.length, 0);
+  } finally {
+    await engine.close();
+  }
 });
 
-test('verify is credit-free and reports key/voice problems', async () => {
-  const ok = createElevenLabsClient({ config: CONFIG, fetchImpl: async () => mockResponse({ json: { voice: { name: 'Sparky' } } }) });
-  assert.deepEqual(await ok.verify(), { ok: true, voiceId: CONFIG.voiceId, name: 'Sparky' });
-  const bad = createElevenLabsClient({ config: CONFIG, fetchImpl: async () => mockResponse({ status: 401 }) });
-  assert.equal((await bad.verify()).code, 'auth');
-  const missing = createElevenLabsClient({ config: CONFIG, fetchImpl: async () => mockResponse({ status: 404 }) });
-  assert.equal((await missing.verify()).code, 'validation');
+test('a spawn failure (ENOENT) is reported, never thrown', async () => {
+  const engine = createPiperTts({
+    env: { HOME: '/home/u', XDG_DATA_HOME: '/home/u/.local/share' },
+    spawnImpl: () => { const error = new Error('spawn ENOENT'); error.code = 'ENOENT'; throw error; },
+    existsSyncImpl: () => true,
+    getConfig: () => CONFIG,
+  });
+  try {
+    const result = await engine.synthesize('hello');
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'not_installed');
+    assert.match(result.message, /voice setup/);
+  } finally {
+    await engine.close();
+  }
 });
 
-test('utterance validation matches the length contract', () => {
+test('a worker-side synthesis error becomes a stable failure code', async () => {
+  const { engine } = engineFor({ worker: fakeWorker({ behavior: 'error' }) });
+  try {
+    const result = await engine.synthesize('hello');
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'failed');
+    assert.match(result.message, /synthesis exploded/);
+  } finally {
+    await engine.close();
+  }
+});
+
+test('a silent worker times out instead of hanging forever', async () => {
+  const { engine } = engineFor({ worker: fakeWorker({ behavior: 'silent' }), timeoutMs: 80 });
+  try {
+    const result = await engine.synthesize('hello');
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'timeout');
+  } finally {
+    await engine.close();
+  }
+});
+
+test('invalid utterances are rejected before any process work', async () => {
+  const { engine, worker } = engineFor();
+  try {
+    for (const bad of ['', '   ', 'x'.repeat(MAX_UTTERANCE_LENGTH + 1), 42, null, 'bad\u0000control']) {
+      const result = await engine.synthesize(bad);
+      assert.equal(result.ok, false);
+      assert.equal(result.code, 'validation');
+    }
+    assert.equal(worker.calls.length, 0);
+  } finally {
+    await engine.close();
+  }
+});
+
+test('probe reports ready, voices_missing, and not_installed without loading a model', async () => {
+  const ready = engineFor();
+  assert.equal((await ready.engine.probe()).status, 'ready');
+  await ready.engine.close();
+
+  const missingVoices = engineFor({ exists: (file) => !file.includes(`${path.sep}voices${path.sep}`) });
+  const voices = await missingVoices.engine.probe();
+  assert.equal(voices.status, 'voices_missing');
+  assert.match(voices.detail, /voice setup/);
+  await missingVoices.engine.close();
+
+  const noRuntime = engineFor({ exists: () => false });
+  const notInstalled = await noRuntime.engine.probe();
+  assert.equal(notInstalled.status, 'not_installed');
+  assert.equal(notInstalled.installed, false);
+  await noRuntime.engine.close();
+});
+
+test('utterance validation and normalisation match the contract', () => {
   assert.equal(isValidUtterance('Your task is complete!'), true);
   assert.equal(isValidUtterance(''), false);
   assert.equal(isValidUtterance('x'.repeat(MAX_UTTERANCE_LENGTH + 1)), false);
   assert.equal(isValidUtterance('ok\u0007bell'), false);
+  assert.equal(normaliseSpeechText('  hello\n\nworld  '), 'hello world');
 });
 
 // ---------------------------------------------------------------------------
@@ -157,10 +271,10 @@ test('cache stays under its size cap by pruning oldest clips', async () => {
   try {
     const blob = Buffer.alloc(400);
     await cache.put(KEY_A, blob);
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((resolve) => setTimeout(resolve, 20));
     await cache.put(KEY_B, blob);
     const third = 'c'.repeat(64);
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((resolve) => setTimeout(resolve, 20));
     await cache.put(third, blob);
     const { bytes } = await cache.stats();
     assert.ok(bytes <= 1024, `cache trimmed to cap (was ${bytes})`);
@@ -177,15 +291,14 @@ test('cache writes owner-only files inside its own directory', async () => {
     const file = await cache.put(KEY_A, Buffer.from('secret-voice'));
     assert.ok(file.startsWith(path.resolve(dir) + path.sep), 'file inside cache dir');
     assert.equal((await stat(file)).mode & 0o777, 0o600);
-    const stray = path.join(dir, '..', 'outside.mp3');
-    assert.notEqual(path.resolve(stray), file);
+    assert.ok(path.resolve(file).startsWith(path.resolve(dir) + path.sep), 'never outside its directory');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
 // ---------------------------------------------------------------------------
-// Voice lines and agent reactions
+// Voice lines and agent reactions (unchanged contract)
 // ---------------------------------------------------------------------------
 
 test('voice lines cover the required events and stay short', () => {
@@ -221,19 +334,22 @@ test('agent reactions: only confirmed events announce; idle never claims success
 // Voice service
 // ---------------------------------------------------------------------------
 
-function makeService({ configured = true, synthesizeImpl = null, maxBytes = undefined } = {}) {
+function makeService({ configured = true, synthesizeImpl = null } = {}) {
   const dir = path.join(os.tmpdir(), `sparkiee-vs-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  const cache = createAudioCache({ dir, maxBytes });
+  const cache = createAudioCache({ dir });
   const pet = createPetController();
   const calls = [];
+  const engine = {
+    provider: 'piper',
+    probe: async () => ({ engine: 'piper', status: 'ready', installed: true, voices: {}, detail: 'ready' }),
+    synthesize: synthesizeImpl ?? (async (text, { language }) => {
+      calls.push({ text, language });
+      return { ok: true, audio: Buffer.from(makeWav()), mime: 'audio/wav', provider: 'piper' };
+    }),
+  };
   const service = createVoiceService({
     getConfig: () => ({ configured, config: CONFIG }),
-    getClient: () => (configured ? {
-      synthesize: synthesizeImpl ?? (async (text) => {
-        calls.push(text);
-        return { ok: true, audio: Buffer.from(`audio:${text}`), mime: 'audio/mpeg' };
-      }),
-    } : null),
+    getEngine: () => (configured ? engine : null),
     cache,
     petController: pet,
   });
@@ -241,26 +357,84 @@ function makeService({ configured = true, synthesizeImpl = null, maxBytes = unde
 }
 
 test('speak publishes a clip announcement and caches the audio', async () => {
-  const { service, pet, calls, dir } = makeService();
+  const { service, calls, dir } = makeService();
   try {
     const snapshot = await service.speak('Your task is complete!');
     assert.equal(calls.length, 1);
+    assert.equal(calls[0].language, 'en');
     assert.ok(snapshot.speech.clipId, 'clip id published');
     assert.equal(snapshot.speech.text, 'Your task is complete!');
     assert.equal(snapshot.speech.error, null);
-    // second identical phrase is served from cache: no new provider call
+    assert.equal(snapshot.provider, 'piper');
+    // second identical phrase is served from cache: no new synthesis
     await service.speak('Your task is complete!');
-    assert.equal(calls.length, 1, 'cache hit, no duplicate spend');
+    assert.equal(calls.length, 1, 'cache hit, no duplicate work');
     const status = await service.status();
     assert.equal(status.cacheFiles, 1);
-    assert.ok(!JSON.stringify(status).includes(CONFIG.apiKey), 'status never leaks the key');
+    assert.equal(status.provider, 'piper');
+    assert.equal(status.configured, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an old espeak-ng cache entry never shadows a newly configured Piper', async () => {
+  const dir = path.join(os.tmpdir(), `sparkiee-vs-shadow-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const cache = createAudioCache({ dir });
+  const pet = createPetController();
+  let configured = false;
+  let engineCalls = 0;
+  let localCalls = 0;
+  const engine = {
+    probe: async () => ({ engine: 'piper', status: 'ready', installed: true, voices: {}, detail: 'ready' }),
+    synthesize: async () => {
+      engineCalls += 1;
+      return { ok: true, audio: Buffer.from(makeWav()), mime: 'audio/wav' };
+    },
+  };
+  const service = createVoiceService({
+    getConfig: () => ({ configured, config: CONFIG }),
+    getEngine: () => (configured ? engine : null),
+    cache,
+    petController: pet,
+    localTts: {
+      voice: 'en-us',
+      speed: 165,
+      synthesize: async () => {
+        localCalls += 1;
+        return { ok: true, audio: Buffer.from(makeWav()), mime: 'audio/wav' };
+      },
+    },
+  });
+  try {
+    // First run: Piper absent, so the phrase is cached from the fallback.
+    const fallback = await service.speak('A phrase spoken before Piper existed.');
+    assert.equal(fallback.provider, 'espeak-ng');
+    assert.equal(localCalls, 1);
+
+    // Piper is installed later. The fallback cache entry must not win.
+    configured = true;
+    const spoken = await service.speak('A phrase spoken before Piper existed.');
+    assert.equal(spoken.provider, 'piper');
+    assert.equal(engineCalls, 1, 'the configured primary engine is used');
+    assert.equal(localCalls, 1, 'the fallback is not asked again');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Hindi text reaches the engine with the Hindi language hint', async () => {
+  const { service, calls, dir } = makeService();
+  try {
+    await service.speak('नमस्ते! मैं स्पार्की हूँ।');
+    assert.equal(calls[0].language, 'hi');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
 test('unconfigured speak still announces the caption with an honest error', async () => {
-  const { service, pet, dir } = makeService({ configured: false });
+  const { service, dir } = makeService({ configured: false });
   try {
     const snapshot = await service.speak('Hi there!');
     assert.equal(snapshot.speech.clipId, null);
@@ -274,36 +448,31 @@ test('unconfigured speak still announces the caption with an honest error', asyn
   }
 });
 
-test('provider failures become honest speech errors, not fake success', async () => {
-  const { service, dir } = makeService({ synthesizeImpl: async () => ({ ok: false, code: 'quota', message: 'out of credits' }) });
+test('engine failures become honest speech errors, not fake success', async () => {
+  const { service, dir } = makeService({
+    synthesizeImpl: async () => ({ ok: false, code: 'voice_missing', message: 'Hindi voice is not downloaded' }),
+  });
   try {
     const snapshot = await service.speak('Yay!');
     assert.equal(snapshot.speech.clipId, null);
-    assert.equal(snapshot.speech.error, 'quota');
-    assert.match(describeSpeechError('quota'), /credits/);
+    assert.equal(snapshot.speech.error, 'voice_missing');
+    assert.match(describeSpeechError('voice_missing'), /voice setup/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('in-flight requests for the same phrase share one provider call', async () => {
-  let resolveFirst;
+test('in-flight requests for the same phrase share one engine call', async () => {
   let invocations = 0;
   const { service, dir } = makeService({
-    synthesizeImpl: () => {
+    synthesizeImpl: async () => {
       invocations += 1;
-      return new Promise((resolve) => { resolveFirst = () => resolve({ ok: true, audio: Buffer.from('x'), mime: 'audio/mpeg' }); });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return { ok: true, audio: Buffer.from(makeWav()), mime: 'audio/wav' };
     },
   });
   try {
-    const p1 = service.speak('Still working on it!');
-    const p2 = service.speak('Still working on it!');
-    const deadline = Date.now() + 2_000;
-    while (typeof resolveFirst !== 'function' && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 5));
-    }
-    resolveFirst();
-    await Promise.all([p1, p2]);
+    await Promise.all([service.speak('Still working on it!'), service.speak('Still working on it!')]);
     assert.equal(invocations, 1);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -313,7 +482,7 @@ test('in-flight requests for the same phrase share one provider call', async () 
 test('user-triggered tests are rate limited while events are not', async () => {
   const { service, dir } = makeService();
   try {
-    for (let i = 0; i < 5; i += 1) await service.test();
+    for (let index = 0; index < 5; index += 1) await service.test();
     await assert.rejects(() => service.test(), /Too many voice test/);
   } finally {
     await rm(dir, { recursive: true, force: true });

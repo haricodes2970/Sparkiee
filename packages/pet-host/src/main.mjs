@@ -3,6 +3,7 @@ import { createShortcutHost } from './shortcut-host.mjs';
 import { hotkeyAction } from '../../core/src/voice-hotkey.mjs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createMovementController } from './movement.mjs';
 import { listCharacterPacks } from '../../core/src/character-pack.mjs';
 import { COMMAND_VOICE_EVENTS, desktopWindowVisible } from '../../core/src/pet-state.mjs';
@@ -42,6 +43,15 @@ const hostStartedAt = Date.now();
 /** Continuous daemon-unreachable time after which an unsupervised host exits. */
 const ORPHAN_EXIT_MS = 15_000;
 let runtimeUnreachableAt = null;
+let lastDocked = false;
+let dockAnchor = null; // {x, y, displayId} — where Sparky sleeps on the chatbox
+let dockSleepTimer = null;
+let lastTaskUpdatedAt = null;
+const CONFIG_DIR = path.join(
+  process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || '', '.config'),
+  'sparkiee',
+);
+const HOST_CONFIG_FILE = path.join(CONFIG_DIR, 'pet-host.json');
 
 // Single-instance ownership at the Electron layer: a second pet host process
 // must never put a second Sparky on the desktop. The lock is a cheap first
@@ -78,6 +88,100 @@ function isPointerPoint(point) {
     Math.abs(point.screenX) < 100_000 && Math.abs(point.screenY) < 100_000;
 }
 
+// ---------------------------------------------------------------------------
+// Dock anchor: the screen position Sparky sleeps on. Manual by design — the
+// OpenCode chatbox lives inside a terminal, so no window title can identify
+// it reliably. The first dock uses the bottom-centre of the active display
+// (where chat inputs live); dragging the sleeping pet refines the spot and
+// each drag-end saves it. Only coordinates and a display id are stored.
+// ---------------------------------------------------------------------------
+function validAnchor(value) {
+  return Boolean(value && typeof value === 'object'
+    && Number.isInteger(value.x) && Number.isInteger(value.y)
+    && Math.abs(value.x) < 100_000 && Math.abs(value.y) < 100_000
+    && (value.displayId === null || typeof value.displayId === 'string'));
+}
+
+async function loadHostConfig() {
+  try {
+    const parsed = JSON.parse(await readFile(HOST_CONFIG_FILE, 'utf8'));
+    if (validAnchor(parsed?.anchor)) dockAnchor = parsed.anchor;
+  } catch {
+    // Missing or malformed config simply means "no anchor yet".
+  }
+}
+
+async function saveHostConfig() {
+  try {
+    await mkdir(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    await writeFile(HOST_CONFIG_FILE, `${JSON.stringify({ anchor: dockAnchor }, null, 2)}\n`, { mode: 0o600 });
+  } catch {
+    // Losing the anchor is harmless; docking still works this session.
+  }
+}
+
+function displayForAnchor(anchor) {
+  if (anchor) {
+    const found = screen.getAllDisplays().find((display) => String(display.id) === anchor.displayId);
+    if (found) return found;
+  }
+  return screen.getPrimaryDisplay();
+}
+
+function defaultDockAnchor(display, bounds) {
+  const area = display.workArea;
+  return {
+    x: Math.round(area.x + Math.max(0, (area.width - bounds.width) / 2)),
+    // Bottom-centre, just above the work-area edge: OpenCode's prompt sits in
+    // the lowest rows of a maximised terminal.
+    y: Math.round(area.y + Math.max(0, area.height - bounds.height - 24)),
+    displayId: String(display.id),
+  };
+}
+
+function dockWindowToAnchor() {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  const bounds = petWindow.getBounds();
+  if (!dockAnchor) {
+    dockAnchor = defaultDockAnchor(screen.getPrimaryDisplay(), bounds);
+    void saveHostConfig();
+  }
+  const display = displayForAnchor(dockAnchor);
+  const area = display.workArea;
+  const x = Math.min(Math.max(area.x, dockAnchor.x), area.x + area.width - bounds.width);
+  const y = Math.min(Math.max(area.y, dockAnchor.y), area.y + area.height - bounds.height);
+  petWindow.setPosition(Math.round(x), Math.round(y), false);
+}
+
+/** Capture the user's refined sleep spot after a drag while docked. */
+function rememberDockAnchor() {
+  if (!latestState?.docked || !petWindow || petWindow.isDestroyed()) return;
+  const [x, y] = petWindow.getPosition();
+  const display = screen.getDisplayMatching(petWindow.getBounds());
+  dockAnchor = { x: Math.round(x), y: Math.round(y), displayId: String(display.id) };
+  void saveHostConfig();
+}
+
+function reactToDocking(state) {
+  if (!state) return;
+  if (state.docked === true) {
+    movement?.stop();
+    if (!lastDocked) dockWindowToAnchor();
+  }
+  lastDocked = state.docked === true;
+}
+
+function scheduleDockSleep() {
+  if (dockSleepTimer) clearTimeout(dockSleepTimer);
+  dockSleepTimer = setTimeout(() => {
+    dockSleepTimer = null;
+    if (latestState?.docked && latestState?.task && latestState.task.active !== true) {
+      void sendCommand('sleep').catch(() => {});
+    }
+  }, 6_000);
+  dockSleepTimer.unref?.();
+}
+
 async function requestApi(route, options = {}) {
   if (!TOKEN || !/^[a-f0-9]{64}$/.test(TOKEN)) throw new Error('Sparkiee runtime token is missing or invalid.');
   const { timeoutMs = 1600, ...fetchOptions } = options;
@@ -95,6 +199,11 @@ async function requestApi(route, options = {}) {
 
 function reactToMovement(state) {
   if (!movement || !petWindow || petWindow.isDestroyed()) return;
+  // A docked pet stays on the chatbox: no roaming may pull her off the spot.
+  if (state?.docked === true) {
+    movement.stop();
+    return;
+  }
   // Roaming follows the visible desktop surface only: hidden pets and
   // dashboard-owned pets keep the native window (and its movement) still.
   if (!state || !desktopWindowVisible(state)) {
@@ -192,6 +301,15 @@ function publishState(state) {
       petWindow.webContents.send('pet:state', state);
     }
     reactToMovement(state);
+    reactToDocking(state);
+    if (state?.task && state.task.updatedAt && state.task.updatedAt !== lastTaskUpdatedAt) {
+      lastTaskUpdatedAt = state.task.updatedAt;
+      if (state.docked === true && state.task.active !== true
+        && ['task_complete', 'task_error', 'session_error', 'session_idle'].includes(state.task.lastEvent)) {
+        // Let the celebration breathe, then go back to napping on the chatbox.
+        scheduleDockSleep();
+      }
+    }
     void reloadPackForState(state);
     void deliverPendingSpeech();
   }
@@ -669,6 +787,7 @@ ipcMain.on('pet:drag-end', (event) => {
   if (petWindow && event.sender === petWindow.webContents) {
     dragOrigin = null;
     movement?.resume();
+    rememberDockAnchor();
   }
 });
 
@@ -677,6 +796,7 @@ app.whenReady().then(async () => {
     app.quit();
     return;
   }
+  await loadHostConfig();
   await reloadPackForState(null).catch(() => {});
   petWindow = createPetWindow();
   movement = createMovementController({
@@ -709,6 +829,7 @@ app.whenReady().then(async () => {
     if (pollTimer) clearInterval(pollTimer);
     if (hotkeySyncTimer) clearInterval(hotkeySyncTimer);
     if (levelTimer) clearInterval(levelTimer);
+    if (dockSleepTimer) clearTimeout(dockSleepTimer);
     movement?.stop();
     hotkey.dispose();
     ipcMain.removeHandler('pet:command');

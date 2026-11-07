@@ -284,8 +284,8 @@ test('confirmed completion celebrates and speaks; idle and interrupts stay silen
   const voice = fakeVoiceService();
   const commands = [];
   const petController = {
-    command: (command) => { commands.push(command); return { settings: { speech: { enabled: true, provider: 'elevenlabs', style: 'both' } } }; },
-    snapshot: () => ({ settings: { speech: { enabled: true, provider: 'elevenlabs', style: 'both' } } }),
+    command: (command) => { commands.push(command); return { settings: { speech: { enabled: true, provider: 'piper', style: 'both' } } }; },
+    snapshot: () => ({ settings: { speech: { enabled: true, provider: 'piper', style: 'both' } } }),
   };
   const instance = await startServer({ petController, voiceService: voice, isVoiceReady: () => true });
   try {
@@ -319,8 +319,8 @@ test('agent events dedupe within the window and throttle repeats per session', a
   const voice = fakeVoiceService();
   const commands = [];
   const petController = {
-    command: (command) => { commands.push(command); return { settings: { speech: { enabled: true, provider: 'elevenlabs', style: 'both' } } }; },
-    snapshot: () => ({ settings: { speech: { enabled: true, provider: 'elevenlabs', style: 'both' } } }),
+    command: (command) => { commands.push(command); return { settings: { speech: { enabled: true, provider: 'piper', style: 'both' } } }; },
+    snapshot: () => ({ settings: { speech: { enabled: true, provider: 'piper', style: 'both' } } }),
   };
   const instance = await startServer({
     petController,
@@ -363,7 +363,7 @@ test('agent reactions respect speech settings and stay silent without a provider
   });
   const disabled = fakeVoiceService();
   const off = await startServer({
-    petController: pet({ enabled: false, provider: 'elevenlabs', style: 'speech' }),
+    petController: pet({ enabled: false, provider: 'piper', style: 'speech' }),
     voiceService: disabled,
     isVoiceReady: () => true,
   });
@@ -380,7 +380,7 @@ test('agent reactions respect speech settings and stay silent without a provider
   commands.length = 0;
   const unready = fakeVoiceService();
   const noProvider = await startServer({
-    petController: pet({ enabled: true, provider: 'elevenlabs', style: 'speech' }),
+    petController: pet({ enabled: true, provider: 'piper', style: 'speech' }),
     voiceService: unready,
     isVoiceReady: () => false,
   });

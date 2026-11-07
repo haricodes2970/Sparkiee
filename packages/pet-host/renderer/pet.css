@@ -14,6 +14,7 @@ html, body {
 }
 
 #pet-root {
+  position: relative;
   box-sizing: border-box;
   height: 100vh;
   display: flex;
@@ -69,6 +70,63 @@ html, body {
   pointer-events: none;
 }
 .pet-name-row #pet-name { color: #ffe98a; }
+.dock-badge {
+  padding: 1px 5px;
+  border: 1px solid rgba(143, 216, 255, 0.45);
+  border-radius: 999px;
+  color: #bfe8ff;
+  background: rgba(20, 38, 52, 0.78);
+  font-size: 7px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.dock-badge[hidden] { display: none; }
+
+/* Task collar: visible only while the OpenCode task tracker has a live
+   timer. It sits above the sprite so the elapsed time is readable at a
+   glance without stealing space from the caption. */
+.task-collar {
+  position: absolute;
+  top: 1px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 233, 138, 0.36);
+  border-radius: 999px;
+  background: rgba(24, 20, 34, 0.86);
+  color: #fff1b8;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.35px;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 2;
+}
+.task-collar[hidden] { display: none; }
+.task-collar-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #ffd75e;
+  box-shadow: 0 0 5px #ffd75eaa;
+  animation: task-pulse 1.1s ease-in-out infinite;
+}
+.task-collar-time { color: #ffe98a; font-variant-numeric: tabular-nums; }
+.task-collar[data-outcome="success"] { border-color: rgba(96, 224, 168, 0.55); color: #bff5d9; }
+.task-collar[data-outcome="success"] .task-collar-dot { background: #60e0a8; box-shadow: 0 0 5px #60e0a8aa; animation: none; }
+.task-collar[data-outcome="error"] { border-color: rgba(255, 150, 120, 0.55); color: #ffd3c7; }
+.task-collar[data-outcome="error"] .task-collar-dot { background: #ff9678; box-shadow: none; animation: none; }
+.task-collar[data-outcome="idle"] { border-color: rgba(255, 233, 138, 0.28); color: rgba(255, 247, 224, 0.75); }
+.task-collar[data-outcome="idle"] .task-collar-dot { background: rgba(255, 247, 224, 0.55); box-shadow: none; animation: none; }
+@keyframes task-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
 .pet-status {
   color: rgba(255, 247, 224, 0.65);
   font-weight: 500;

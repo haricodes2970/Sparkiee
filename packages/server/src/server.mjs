@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isAuthorized, toRuntimePayload, DEFAULT_HOST } from '../../core/src/index.mjs';
-import { createPetController, isValidPetCommandPayload, isValidPetSettingsPayload, isValidPresentationClaimPayload, isValidPresentationReleasePayload } from '../../core/src/pet-state.mjs';
+import { createPetController, isValidDockPayload, isValidPetCommandPayload, isValidPetSettingsPayload, isValidPresentationClaimPayload, isValidPresentationReleasePayload } from '../../core/src/pet-state.mjs';
 import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 import { parseMusicIntent, runMusicCommand } from '../../core/src/music-commands.mjs';
@@ -153,10 +153,11 @@ export function createSparkieeServer({
   assistantSpeechRateMax = 8,
   hotkey = null,
   sttStatus = null,
-  chatProvider = null, // { configured(), chat(messages), describe() } — NVIDIA adapter
+  chatProvider = null, // { configured(), chat(messages), describe() } — Groq / Google AI Studio adapter
   refreshChatConfig = async () => {},
   chatHistoryLimit = 12,
   onWindowEvent = null, // ({event, pid}) => void — diagnostics sink
+  onDockChange = null, // (docked) => void — persist the docked posture
   gnomeKeybindingProbe = null, // testable override of the live gsettings probe
 }) {
   let shutdownRequested = false;
@@ -174,7 +175,7 @@ export function createSparkieeServer({
   async function maybeSpeakForCommand(command, snapshot) {
     if (!voiceService || !isVoiceReady()) return;
     const speech = snapshot?.settings?.speech;
-    if (!speech || speech.enabled === false || speech.provider !== 'elevenlabs' || speech.style === 'chirps') return;
+    if (!speech || speech.enabled === false || speech.provider !== 'piper' || speech.style === 'chirps') return;
     const voiceEvent = COMMAND_SPEECH_EVENTS[command];
     if (!voiceEvent) return;
     const now = Date.now();
@@ -187,12 +188,12 @@ export function createSparkieeServer({
     }
   }
 
-  /** Same bar as command speech: configured, enabled, ElevenLabs, not chirps. */
+  /** Same bar as command speech: configured, enabled, local Piper, not chirps. */
   function canSpeakAssistant() {
     if (!voiceService || !isVoiceReady()) return false;
     const speech = petController.snapshot()?.settings?.speech;
     return Boolean(speech) && speech.enabled !== false
-      && speech.provider === 'elevenlabs' && speech.style !== 'chirps';
+      && speech.provider === 'piper' && speech.style !== 'chirps';
   }
 
   /** The line Sparky says when summoned with the shortcut. */
@@ -291,11 +292,11 @@ export function createSparkieeServer({
   }
 
   // -------------------------------------------------------------------------
-  // Conversation (NVIDIA). Music commands are parsed first and NEVER reach the
-  // model: "stop" or "play Madira" must stay a local music action. History is
-  // bounded and in-memory only — nothing is written to disk. When NVIDIA is
-  // unavailable (or local-only mode is on) the reply is an honest explanation,
-  // never a fabricated answer.
+  // Conversation (Groq / Google AI Studio). Music commands are parsed first and
+  // NEVER reach the model: "stop" or "play Madira" must stay a local music
+  // action. History is bounded and in-memory only — nothing is written to disk.
+  // When no provider is configured (or local-only mode is on) the reply is an
+  // honest explanation, never a fabricated answer.
   // -------------------------------------------------------------------------
   const CHAT_SYSTEM_PROMPT = [
     'You are Sparky, a small friendly desktop assistant living on the user\'s screen.',
@@ -315,10 +316,14 @@ export function createSparkieeServer({
     const described = typeof chatProvider?.describe === 'function' ? chatProvider.describe() : null;
     return {
       configured: chatConfigured(),
+      provider: described?.provider ?? null,
+      providerLabel: described?.label ?? null,
+      providers: described?.providers ?? null,
       localOnly: described?.localOnly === true,
       model: described?.model ?? null,
       baseUrl: described?.baseUrl ?? null,
       source: described?.source ?? null,
+      warnings: described?.warnings ?? [],
       historyMessages: chatHistory.length,
       lastError: lastChatError,
     };
@@ -429,7 +434,7 @@ export function createSparkieeServer({
       };
     }
 
-    // Report every assistant outcome on the pet: ElevenLabs speaks it when
+    // Report every assistant outcome on the pet: the local voice speaks it when
     // ready; without a key the voice service still announces the caption and
     // falls back to chirps, so Sparky never goes silent after acting.
     const speech = petController.snapshot()?.settings?.speech;
@@ -635,6 +640,37 @@ export function createSparkieeServer({
       sendJson(response, 200, { ok: true, pet: petSnapshot });
       return;
     }
+    // Dock/undock is a posture change, not an emote: the pet host owns the
+    // screen anchor while the daemon owns the shared docked fact.
+    if (method === 'POST' && pathname === '/api/v1/pet/dock') {
+      if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
+        sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
+        return;
+      }
+      let payload;
+      try {
+        payload = await readJsonBody(request);
+      } catch (error) {
+        sendJson(response, error.statusCode ?? 400, { error: error.message });
+        return;
+      }
+      if (!isValidDockPayload(payload)) {
+        sendJson(response, 400, { error: 'Expected {docked: boolean}.' });
+        return;
+      }
+      let petSnapshot;
+      try {
+        petSnapshot = petController.setDocked(payload.docked);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+        return;
+      }
+      if (typeof onDockChange === 'function') {
+        Promise.resolve(onDockChange(payload.docked)).catch(() => {});
+      }
+      sendJson(response, 200, { ok: true, pet: petSnapshot });
+      return;
+    }
     if (method === 'PUT' && pathname === '/api/v1/pet/settings') {
       if (!isAuthorized(request, token) && !isSameOriginDashboardRequest(request, port)) {
         sendJson(response, 403, { error: 'Forbidden: provide the local runtime token or use the same-origin dashboard.' });
@@ -801,11 +837,17 @@ export function createSparkieeServer({
       }
       const reaction = AGENT_EVENT_REACTIONS[payload.event] ?? null;
       let speech = 'skipped';
-      if (reaction?.command) petController.command(reaction.command);
-      if (reaction?.voiceEvent && voiceService && isVoiceReady()) {
-        const speechSettings = petController.snapshot()?.settings?.speech;
+      // The real controller records the task (timer, outcome) and applies the
+      // reaction. Test doubles that only implement command() keep working.
+      const petSnapshot = typeof petController.agentEvent === 'function'
+        ? petController.agentEvent({ event: payload.event, sessionId: payload.sessionId })
+        : (reaction?.command ? petController.command(reaction.command) : petController.snapshot());
+      const speechSettings = petSnapshot?.settings?.speech;
+      if (petSnapshot?.settings?.quiet === true) {
+        speech = 'muted';
+      } else if (reaction?.voiceEvent && voiceService && isVoiceReady()) {
         if (speechSettings && speechSettings.enabled !== false
-          && speechSettings.provider === 'elevenlabs' && speechSettings.style !== 'chirps') {
+          && speechSettings.provider === 'piper' && speechSettings.style !== 'chirps') {
           // Generation is asynchronous; the plugin call must not wait on
           // the provider. Failures surface in pet state and the dashboard.
           void voiceService.speakEvent(reaction.voiceEvent, { source: 'agent' }).catch(() => {});
@@ -1053,7 +1095,7 @@ export function createSparkieeServer({
     // -------------------------------------------------------------------------
     // Assistant: deterministic text-command routing (music first) then, only
     // for text that is NOT a music command, one conversational turn with the
-    // configured NVIDIA chat model. Auth-gated because commands change player
+    // configured chat provider. Auth-gated because commands change player
     // state and may spend TTS credits. When no chat model is configured the
     // text is never sent anywhere — the reply is an honest explanation.
     // -------------------------------------------------------------------------

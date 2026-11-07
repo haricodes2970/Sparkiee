@@ -81,12 +81,12 @@ function fakeVoiceService({ failRate = false } = {}) {
     },
     async status() {
       calls.status += 1;
-      return { configured: true, voiceId: 'k7uh1RfFIE9Dn75CNvuX', modelId: 'eleven_flash_v2_5', outputFormat: 'mp3_44100_128', cacheFiles: 0, cacheBytes: 0, lastError: null, lastSpokenAt: null, maxSpeechLength: 220, apiKey: HIDDEN_KEY };
+      return { configured: true, provider: 'piper', voices: { hi: 'hi_IN-priyamvada-medium', en: 'en_US-lessac-medium' }, engine: { status: 'ready' }, cacheFiles: 0, cacheBytes: 0, lastError: null, lastSpokenAt: null, maxSpeechLength: 400 };
     },
     async getClip(key) {
       if (!/^[a-f0-9]{64}$/.test(key)) return { status: 'invalid' };
       if (key === 'f'.repeat(64)) return { status: 'missing' };
-      return { status: 'ok', audio: Buffer.from('mp3-bytes'), mime: 'audio/mpeg' };
+      return { status: 'ok', audio: Buffer.from('wav-bytes'), mime: 'audio/wav' };
     },
   };
 }
@@ -101,14 +101,14 @@ const speechState = (speech, speechReady = true) => ({
 });
 
 test('speech policy: chirps yield only when spoken voice is active, enabled, and ready', () => {
-  assert.equal(shouldPlayEventChirp(speechState({ enabled: true, provider: 'elevenlabs', style: 'speech' }, true)), false);
-  assert.equal(shouldPlayEventChirp(speechState({ enabled: true, provider: 'elevenlabs', style: 'both' }, true)), true, 'both keeps chirps');
-  assert.equal(shouldPlayEventChirp(speechState({ enabled: true, provider: 'elevenlabs', style: 'chirps' }, true)), true);
-  assert.equal(shouldPlayEventChirp(speechState({ enabled: false, provider: 'elevenlabs', style: 'speech' }, true)), true, 'speech disabled');
+  assert.equal(shouldPlayEventChirp(speechState({ enabled: true, provider: 'piper', style: 'speech' }, true)), false);
+  assert.equal(shouldPlayEventChirp(speechState({ enabled: true, provider: 'piper', style: 'both' }, true)), true, 'both keeps chirps');
+  assert.equal(shouldPlayEventChirp(speechState({ enabled: true, provider: 'piper', style: 'chirps' }, true)), true);
+  assert.equal(shouldPlayEventChirp(speechState({ enabled: false, provider: 'piper', style: 'speech' }, true)), true, 'speech disabled');
   assert.equal(shouldPlayEventChirp(speechState({ enabled: true, provider: 'chirps', style: 'speech' }, true)), true, 'chirp provider');
-  assert.equal(shouldPlayEventChirp(speechState({ enabled: true, provider: 'elevenlabs', style: 'speech' }, false)), true, 'not ready');
+  assert.equal(shouldPlayEventChirp(speechState({ enabled: true, provider: 'piper', style: 'speech' }, false)), true, 'not ready');
   assert.equal(shouldPlayEventChirp(speechState(undefined, false)), true, 'missing settings default to chirps');
-  assert.equal(speechCarriesReactions(speechState({ enabled: true, provider: 'elevenlabs', style: 'speech' }, true)), true);
+  assert.equal(speechCarriesReactions(speechState({ enabled: true, provider: 'piper', style: 'speech' }, true)), true);
   assert.equal(readSpeechSettings(speechState({ style: 'nonsense' })).style, 'speech');
 });
 
@@ -139,8 +139,8 @@ test('mimeForOutputFormat maps every supported format', () => {
   assert.equal(mimeForOutputFormat('mp3_44100_128'), 'audio/mpeg');
   assert.equal(mimeForOutputFormat('opus_48000_128'), 'audio/ogg');
   assert.equal(mimeForOutputFormat('wav_22050'), 'audio/wav');
-  assert.equal(mimeForOutputFormat('pcm_16000'), 'application/octet-stream');
-  assert.equal(mimeForOutputFormat(undefined), 'audio/mpeg');
+  assert.equal(mimeForOutputFormat('pcm_16000'), 'audio/wav');
+  assert.equal(mimeForOutputFormat(undefined), 'audio/wav');
 });
 
 test('command speech map: reactions only, every target line exists, movement never talks', () => {
@@ -154,12 +154,13 @@ test('command speech map: reactions only, every target line exists, movement nev
 });
 
 test('withoutSecrets strips daemon-only credentials without mutating the source', () => {
-  const source = { HOME: '/home/u', ELEVENLABS_API_KEY: HIDDEN_KEY, SPARKIEE_PORT: '2005' };
+  const source = { HOME: '/home/u', GROQ_API_KEY: HIDDEN_KEY, GOOGLE_AI_API_KEY: HIDDEN_KEY, SPARKIEE_PORT: '2005' };
   const safe = withoutSecrets(source);
-  assert.equal('ELEVENLABS_API_KEY' in safe, false);
+  assert.equal('GROQ_API_KEY' in safe, false);
+  assert.equal('GOOGLE_AI_API_KEY' in safe, false);
   assert.equal(safe.HOME, '/home/u');
   assert.equal(safe.SPARKIEE_PORT, '2005');
-  assert.equal(source.ELEVENLABS_API_KEY, HIDDEN_KEY, 'original untouched');
+  assert.equal(source.GROQ_API_KEY, HIDDEN_KEY, 'original untouched');
   assert.deepEqual(withoutSecrets({ A: '1' }, []), { A: '1' });
 });
 
@@ -172,8 +173,11 @@ test('voice service serves cached clips and refuses hostile ids', async (t) => {
   const cache = createAudioCache({ dir });
   const pet = createPetController();
   const service = createVoiceService({
-    getConfig: () => ({ configured: true, config: { apiKey: HIDDEN_KEY, voiceId: 'k7uh1RfFIE9Dn75CNvuX', modelId: 'eleven_flash_v2_5', outputFormat: 'mp3_44100_128' } }),
-    getClient: () => ({ synthesize: async () => ({ ok: true, audio: Buffer.from('clip-bytes'), mime: 'audio/mpeg' }) }),
+    getConfig: () => ({ configured: true, config: { engine: 'piper', voices: { hi: 'hi_IN-priyamvada-medium', en: 'en_US-lessac-medium' }, speed: 1 } }),
+    getEngine: () => ({
+      probe: async () => ({ engine: 'piper', status: 'ready', installed: true, detail: 'ready' }),
+      synthesize: async () => ({ ok: true, audio: Buffer.from('clip-bytes'), mime: 'audio/wav' }),
+    }),
     cache,
     petController: pet,
   });
@@ -182,12 +186,12 @@ test('voice service serves cached clips and refuses hostile ids', async (t) => {
   assert.ok(snapshot.speech.clipId);
   const clip = await service.getClip(snapshot.speech.clipId);
   assert.equal(clip.status, 'ok');
-  assert.equal(clip.mime, 'audio/mpeg');
+  assert.equal(clip.mime, 'audio/wav');
   assert.equal(clip.audio.toString(), 'clip-bytes');
   assert.equal((await service.getClip('../escape')).status, 'invalid');
   assert.equal((await service.getClip('not-hex-'.padEnd(64, 'z'))).status, 'invalid');
   assert.equal((await service.getClip('e'.repeat(64))).status, 'missing');
-  assert.ok(!JSON.stringify(await service.status()).includes(HIDDEN_KEY), 'service status hides the key');
+  assert.ok(!JSON.stringify(await service.status()).includes(HIDDEN_KEY), 'service status hides credentials');
 });
 
 // ---------------------------------------------------------------------------
@@ -319,9 +323,9 @@ test('clip delivery is token-only and validates ids', async () => {
 
     const ok = await fetch(`${base}/api/v1/voice/clip/${goodId}`, { headers: authHeaders() });
     assert.equal(ok.status, 200);
-    assert.equal(ok.headers.get('content-type'), 'audio/mpeg');
+    assert.equal(ok.headers.get('content-type'), 'audio/wav');
     assert.match(ok.headers.get('cache-control') ?? '', /private/);
-    assert.equal(Buffer.from(await ok.arrayBuffer()).toString(), 'mp3-bytes');
+    assert.equal(Buffer.from(await ok.arrayBuffer()).toString(), 'wav-bytes');
   } finally {
     await close(instance.server);
   }

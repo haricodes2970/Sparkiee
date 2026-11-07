@@ -49,7 +49,7 @@ async function makeEnv(extra = {}) {
     scratch,
     port,
     home,
-    env: { ...process.env, SPARKIEE_HOME: home, SPARKIEE_PORT: String(port), SPARKIEE_DISABLE_PET: '1', ...extra },
+    env: { ...process.env, SPARKIEE_HOME: home, SPARKIEE_PORT: String(port), SPARKIEE_DISABLE_PET: '1', SPARKIEE_MUSIC_ROOTS: path.join(scratch, 'no-music'), ...extra },
   };
 }
 

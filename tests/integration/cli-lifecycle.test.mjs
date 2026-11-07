@@ -41,7 +41,7 @@ function runCli(args, env, timeout = 10_000) {
 }
 
 function makeEnv(home, port) {
-  return { ...process.env, SPARKIEE_HOME: home, SPARKIEE_PORT: String(port), SPARKIEE_DISABLE_PET: '1' };
+  return { ...process.env, SPARKIEE_HOME: home, SPARKIEE_PORT: String(port), SPARKIEE_DISABLE_PET: '1', SPARKIEE_MUSIC_ROOTS: path.join(home, 'no-music') };
 }
 
 test('CLI help and version work without starting the daemon', async () => {

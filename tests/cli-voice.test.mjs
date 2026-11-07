@@ -1,14 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer as createNetServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BIN = fileURLToPath(new URL('../bin/sparkiee.mjs', import.meta.url));
-const SAMPLE_KEY = 'sk_cli_test_key_0123456789abcdefghij';
 
 async function tempEnv(extra = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'sparkiee-clivoice-'));
@@ -28,8 +27,8 @@ async function tempEnv(extra = {}) {
       XDG_CONFIG_HOME: path.join(root, '.config'),
       XDG_STATE_HOME: path.join(root, '.state'),
       XDG_CACHE_HOME: path.join(root, '.cache'),
+      XDG_DATA_HOME: path.join(root, '.local', 'share'),
       SPARKIEE_PORT: String(port),
-      ELEVENLABS_API_KEY: '',
       ...extra,
     },
   };
@@ -39,71 +38,44 @@ function run(env, args, input = undefined) {
   return spawnSync(process.execPath, [BIN, ...args], { env, input, encoding: 'utf8', timeout: 20_000 });
 }
 
-test('voice status reports unconfigured state without secrets', async (t) => {
+test('voice status describes the local engine, both voices, and honest install state', async (t) => {
   const { root, env } = await tempEnv();
   t.after(() => rm(root, { recursive: true, force: true }));
   const result = run(env, ['voice', 'status']);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Configured: no — original chirps are in use/);
-  assert.match(result.stdout, /k7uh1RfFIE9Dn75CNvuX \(Sparky default\)/);
-  assert.match(result.stdout, /eleven_flash_v2_5/);
+  assert.match(result.stdout, /Voice engine\s+: piper \(local, free, no account\)/);
+  assert.match(result.stdout, /Runtime\s+: not_installed/);
+  assert.match(result.stdout, /Hindi voice\s+: Priyamvada \(Hindi, female\)/);
+  assert.match(result.stdout, /English voice\s+: Lessac \(English, female\)/);
+  assert.match(result.stdout, /sparkiee voice setup/);
   assert.match(result.stdout, /Runtime: not running/);
-  assert.ok(!result.stdout.includes('sk_'), 'no key material printed');
+  assert.ok(!/apikey|gsk_|AIza/.test(result.stdout), 'no key material or cloud provider');
 });
 
-test('voice setup accepts a piped key, never echoes it, stores 0600', async (t) => {
+test('voice setup rejects an invalid timeout before downloading anything', async (t) => {
   const { root, env } = await tempEnv();
   t.after(() => rm(root, { recursive: true, force: true }));
-  const result = run(env, ['voice', 'setup', '--no-verify'], `${SAMPLE_KEY}\n`);
-  assert.equal(result.status, 0, result.stderr);
-  assert.ok(!result.stdout.includes(SAMPLE_KEY), 'key never echoed');
-  assert.ok(!result.stderr.includes(SAMPLE_KEY), 'key never echoed to stderr');
-  assert.match(result.stdout, new RegExp(`Key saved \\(${SAMPLE_KEY.length} characters`));
-  const file = path.join(root, '.config', 'sparkiee', 'voice.json');
-  assert.equal((await stat(file)).mode & 0o777, 0o600, 'secret file is owner-only');
-  const stored = JSON.parse(await readFile(file, 'utf8'));
-  assert.equal(stored.apiKey, SAMPLE_KEY);
-  assert.equal(stored.voiceId, 'k7uh1RfFIE9Dn75CNvuX');
-  assert.equal(stored.modelId, 'eleven_flash_v2_5');
-
-  const status = run(env, ['voice', 'status']);
-  assert.match(status.stdout, /Configured: yes \(from file\)/);
-});
-
-test('voice setup rejects malformed keys and saves nothing', async (t) => {
-  const { root, env } = await tempEnv();
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const result = run(env, ['voice', 'setup', '--no-verify'], 'not-a-key\n');
+  const result = run(env, ['voice', 'setup', '--timeout-ms', '10']);
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /does not look like an ElevenLabs API key/);
-  await assert.rejects(() => readFile(path.join(root, '.config', 'sparkiee', 'voice.json')), /ENOENT/);
+  assert.match(result.stderr, /Invalid --timeout-ms/);
 });
 
-test('voice setup --key-file reads the key from a file and handles unknown flags', async (t) => {
+test('voice setup rejects unknown flags with usage', async (t) => {
   const { root, env } = await tempEnv();
   t.after(() => rm(root, { recursive: true, force: true }));
-  const keyFile = path.join(root, 'key.txt');
-  await writeFile(keyFile, `${SAMPLE_KEY}`, { mode: 0o600 });
-  const result = run(env, ['voice', 'setup', '--key-file', keyFile, '--no-verify']);
-  assert.equal(result.status, 0, result.stderr);
-  assert.ok(!result.stdout.includes(SAMPLE_KEY));
-  const bad = run(env, ['voice', 'setup', '--frobnicate']);
-  assert.notEqual(bad.status, 0);
-  assert.match(bad.stderr, /Unknown option/);
+  const result = run(env, ['voice', 'setup', '--frobnicate']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unknown option/);
+  assert.match(result.stderr, /voice setup \[--timeout-ms/);
 });
 
-test('env var key wins over the file in status output', async (t) => {
+test('chat provider keys are ignored by voice status, never echoed', async (t) => {
   const { root, env } = await tempEnv();
   t.after(() => rm(root, { recursive: true, force: true }));
-  const file = path.join(root, '.config', 'sparkiee', 'voice.json');
-  await run(env, ['voice', 'setup', '--no-verify'], `${SAMPLE_KEY}\n`);
-  const envKey = 'sk_environment_key_9876543210zyxwvutsrq';
-  const status = run({ ...env, ELEVENLABS_API_KEY: envKey }, ['voice', 'status']);
+  const status = run({ ...env, GROQ_API_KEY: 'gsk_should_be_ignored_000000000000' }, ['voice', 'status']);
   assert.equal(status.status, 0, status.stderr);
-  assert.match(status.stdout, /Configured: yes \(from env\)/);
-  assert.ok(!status.stdout.includes(envKey), 'env key not printed either');
-  assert.ok(!status.stdout.includes(SAMPLE_KEY));
-  void file;
+  assert.ok(!status.stdout.includes('gsk_should_be_ignored'), 'chat key never printed');
+  assert.match(status.stdout, /Voice engine\s+: piper/);
 });
 
 test('voice test and mute fail clearly when the daemon is not running', async (t) => {
@@ -116,7 +88,7 @@ test('voice test and mute fail clearly when the daemon is not running', async (t
   }
 });
 
-test('unknown voice subcommands list the valid ones; help documents voice', async (t) => {
+test('unknown voice subcommands list the valid ones; help documents the local voice', async (t) => {
   const { root, env } = await tempEnv();
   t.after(() => rm(root, { recursive: true, force: true }));
   const bad = run(env, ['voice', 'shout']);
@@ -124,8 +96,9 @@ test('unknown voice subcommands list the valid ones; help documents voice', asyn
   assert.match(bad.stderr, /voice status \| setup \| test \| mute \| unmute/);
   const help = run(env, ['--help']);
   assert.equal(help.status, 0);
-  assert.match(help.stdout, /voice setup {2}Store the ElevenLabs API key/);
-  assert.match(help.stdout, /ELEVENLABS_API_KEY/);
+  assert.match(help.stdout, /voice setup {2}Install the free local voice \(Piper\)/);
+  assert.match(help.stdout, /SPARKIEE_TTS_SPEED/);
+  assert.ok(!/gsk_|AIza/.test(help.stdout));
 });
 
 test('single-command guard still rejects stray arguments for other commands', async (t) => {

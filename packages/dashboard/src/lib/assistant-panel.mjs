@@ -80,7 +80,7 @@ export function assistantPanelViewModel(payload = {}) {
     conversationLabel: !conversation
       ? 'unknown'
       : conversation.localOnly === true
-        ? 'local-only — nothing is sent to NVIDIA'
+        ? 'local-only — nothing leaves this machine'
         : conversation.configured === true
           ? `ready (${conversation.model ?? 'model unknown'})`
           : 'not set up — run “sparkiee assistant setup”',

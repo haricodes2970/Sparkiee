@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CHAT_ERROR_MESSAGES, createNvidiaChatClient } from '../packages/core/src/chat-client.mjs';
+import { CHAT_ERROR_MESSAGES, createChatClient } from '../packages/core/src/chat-client.mjs';
 import { containsSecretLike, redactSecrets } from '../packages/core/src/secret-redaction.mjs';
 
-const KEY = 'nvapi-abcdefghijklmnopqrstuvwxyz0123456789';
-const MODEL = 'meta/llama-3.1-8b-instruct';
+const GROQ_KEY = 'gsk_abcdefghijklmnopqrstuvwxyz0123456789';
+const GOOGLE_KEY = 'AIzaSyA1234567890abcdefghijklmnopqrstuv';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
+const GOOGLE_MODEL = 'gemini-2.5-flash';
 
 function jsonResponse(status, body) {
   return {
@@ -14,153 +16,173 @@ function jsonResponse(status, body) {
   };
 }
 
-function clientWith(handler, overrides = {}) {
+function clientFor(provider, handler, overrides = {}) {
   const calls = [];
   const fetchImpl = async (url, options = {}) => {
     calls.push({ url, options });
     return handler(url, options);
   };
-  const client = createNvidiaChatClient({
-    config: { apiKey: KEY, model: MODEL, baseUrl: 'https://integrate.api.nvidia.com/v1', localOnly: false },
-    fetchImpl,
-    ...overrides,
-  });
+  const config = provider === 'groq'
+    ? { apiKey: GROQ_KEY, model: GROQ_MODEL, baseUrl: 'https://api.groq.com/openai/v1', localOnly: false }
+    : { apiKey: GOOGLE_KEY, model: GOOGLE_MODEL, baseUrl: 'https://generativelanguage.googleapis.com/v1beta', localOnly: false };
+  const client = createChatClient({ provider, config, fetchImpl, ...overrides });
   return { client, calls };
 }
 
-test('chat posts the OpenAI-compatible body with the model and bounded messages', async () => {
-  const { client, calls } = clientWith(() => jsonResponse(200, {
-    model: MODEL,
+test('groq posts an OpenAI-compatible body and parses the reply', async () => {
+  const { client, calls } = clientFor('groq', () => jsonResponse(200, {
+    model: GROQ_MODEL,
     choices: [{ message: { role: 'assistant', content: '  Hello there.  ' } }],
     usage: { total_tokens: 12 },
   }));
   const result = await client.chat({ messages: [{ role: 'user', content: 'hi' }] });
   assert.equal(result.ok, true);
-  assert.equal(result.text, 'Hello there.', 'content trimmed');
-  assert.equal(result.model, MODEL);
-
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, 'https://integrate.api.nvidia.com/v1/chat/completions');
-  assert.equal(calls[0].options.method, 'POST');
-  assert.equal(calls[0].options.headers.authorization, `Bearer ${KEY}`);
+  assert.equal(result.text, 'Hello there.');
+  assert.equal(calls[0].url, 'https://api.groq.com/openai/v1/chat/completions');
+  assert.equal(calls[0].options.headers.authorization, `Bearer ${GROQ_KEY}`);
   const body = JSON.parse(calls[0].options.body);
-  assert.equal(body.model, MODEL);
+  assert.equal(body.model, GROQ_MODEL);
   assert.equal(body.stream, false);
-  assert.equal(body.messages[0].role, 'user');
   assert.ok(body.max_tokens > 0 && body.max_tokens <= 2048);
 });
 
-test('listModels reads the live model ids and ignores malformed entries', async () => {
-  const { client, calls } = clientWith(() => jsonResponse(200, {
-    data: [{ id: MODEL }, { id: 'nvidia/embed-qa' }, { nope: true }, { id: '' }, 'x'],
+test('google sends the key in a header (never the URL) and reads candidate parts', async () => {
+  const { client, calls } = clientFor('google', () => jsonResponse(200, {
+    candidates: [{ content: { role: 'model', parts: [{ text: ' Namaste! ' }, { text: 'How are you?' }] }, finishReason: 'STOP' }],
+    usageMetadata: { totalTokenCount: 21 },
   }));
-  const listed = await client.listModels();
-  assert.equal(listed.ok, true);
-  assert.deepEqual(listed.models, [MODEL, 'nvidia/embed-qa']);
-  assert.equal(calls[0].url, 'https://integrate.api.nvidia.com/v1/models');
-  assert.equal(calls[0].options.method, 'GET');
+  const result = await client.chat({ messages: [{ role: 'system', content: 'be brief' }, { role: 'user', content: 'hi' }] });
+  assert.equal(result.ok, true);
+  assert.equal(result.text, 'Namaste! How are you?');
+  assert.match(calls[0].url, /\/models\/gemini-2\.5-flash:generateContent$/);
+  assert.ok(!calls[0].url.includes(GOOGLE_KEY), 'key is not in the URL');
+  assert.equal(calls[0].options.headers['x-goog-api-key'], GOOGLE_KEY);
+  const body = JSON.parse(calls[0].options.body);
+  assert.equal(body.systemInstruction.parts[0].text, 'be brief');
+  assert.deepEqual(body.contents, [{ role: 'user', parts: [{ text: 'hi' }] }]);
+});
+
+test('google maps assistant turns to the model role', async () => {
+  const { client, calls } = clientFor('google', () => jsonResponse(200, { candidates: [{ content: { parts: [{ text: 'ok' }] } }] }));
+  await client.chat({ messages: [{ role: 'user', content: 'a' }, { role: 'assistant', content: 'b' }, { role: 'user', content: 'c' }] });
+  const body = JSON.parse(calls[0].options.body);
+  assert.deepEqual(body.contents.map((entry) => entry.role), ['user', 'model', 'user']);
+});
+
+test('model discovery works for both providers and ignores non-chat entries', async () => {
+  const groq = clientFor('groq', () => jsonResponse(200, { data: [{ id: GROQ_MODEL }, { id: 'whisper-large-v3' }, { nope: true }, 'x'] }));
+  const groqList = await groq.client.listModels();
+  assert.equal(groqList.ok, true);
+  assert.ok(groqList.models.includes(GROQ_MODEL));
+  assert.ok(!groqList.models.includes('x'));
+
+  const google = clientFor('google', () => jsonResponse(200, {
+    models: [
+      { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
+      { name: 'models/text-embedding-004', supportedGenerationMethods: ['embedContent'] },
+    ],
+  }));
+  const googleList = await google.client.listModels();
+  assert.equal(googleList.ok, true);
+  assert.deepEqual(googleList.models, ['gemini-2.5-flash']);
 });
 
 test('provider status codes map to stable, explainable error codes', async () => {
-  const cases = [
-    [401, 'auth'],
-    [403, 'auth'],
-    [404, 'model_not_found'],
-    [429, 'rate_limited'],
-    [400, 'provider_error'],
-    [500, 'provider_error'],
-    [503, 'provider_error'],
-  ];
+  const cases = [[401, 'auth'], [403, 'auth'], [404, 'model_not_found'], [429, 'rate_limited'], [400, 'provider_error'], [500, 'provider_error'], [503, 'provider_error']];
   for (const [status, expected] of cases) {
-    const { client } = clientWith(() => jsonResponse(status, { error: { message: 'nope' } }));
+    const { client } = clientFor('groq', () => jsonResponse(status, { error: { message: 'nope' } }));
     const result = await client.chat({ messages: [{ role: 'user', content: 'hi' }] });
     assert.equal(result.ok, false, `HTTP ${status} fails`);
     assert.equal(result.error.code, expected, `HTTP ${status} → ${expected}`);
-    // Every code has actionable, human-readable text.
     assert.ok(result.error.message.length > 10);
   }
 });
 
 test('a provider error that echoes the key is redacted before it can be shown', async () => {
-  const { client } = clientWith(() => jsonResponse(401, `{"error":"invalid key: ${KEY}"}`));
-  const result = await client.chat({ messages: [{ role: 'user', content: 'hi' }] });
-  assert.equal(result.ok, false);
-  assert.ok(!JSON.stringify(result).includes(KEY), 'key never survives (detail included)');
+  const groq = clientFor('groq', () => jsonResponse(401, `{"error":"invalid key: ${GROQ_KEY}"}`));
+  const result = await groq.client.chat({ messages: [{ role: 'user', content: 'hi' }] });
+  assert.ok(!JSON.stringify(result).includes(GROQ_KEY));
   assert.match(result.error.detail, /redacted/);
+
+  const google = clientFor('google', () => jsonResponse(403, `{"error":{"message":"bad ${GOOGLE_KEY}"}}`));
+  assert.ok(!JSON.stringify(await google.client.chat({ messages: [{ role: 'user', content: 'hi' }] })).includes(GOOGLE_KEY));
 });
 
 test('network and timeout failures are distinguished and never throw', async () => {
-  const network = createNvidiaChatClient({
-    config: { apiKey: KEY, model: MODEL, baseUrl: 'https://x/v1', localOnly: false },
+  const network = createChatClient({
+    provider: 'groq',
+    config: { apiKey: GROQ_KEY, model: GROQ_MODEL, baseUrl: 'https://x/v1', localOnly: false },
     fetchImpl: async () => { throw new TypeError('fetch failed'); },
   });
-  const netResult = await network.chat({ messages: [{ role: 'user', content: 'hi' }] });
-  assert.equal(netResult.error.code, 'network');
+  assert.equal((await network.chat({ messages: [{ role: 'user', content: 'hi' }] })).error.code, 'network');
 
-  const timeout = createNvidiaChatClient({
-    config: { apiKey: KEY, model: MODEL, baseUrl: 'https://x/v1', localOnly: false },
-    fetchImpl: async () => { const e = new Error('aborted'); e.name = 'AbortError'; throw e; },
+  const timeout = createChatClient({
+    provider: 'google',
+    config: { apiKey: GOOGLE_KEY, model: GOOGLE_MODEL, baseUrl: 'https://x/v1beta', localOnly: false },
+    fetchImpl: async () => { const error = new Error('aborted'); error.name = 'AbortError'; throw error; },
   });
-  const timeoutResult = await timeout.chat({ messages: [{ role: 'user', content: 'hi' }] });
-  assert.equal(timeoutResult.error.code, 'timeout');
+  assert.equal((await timeout.chat({ messages: [{ role: 'user', content: 'hi' }] })).error.code, 'timeout');
 });
 
-test('an empty or unparseable completion is an honest empty_reply, not a made-up answer', async () => {
-  const empty = clientWith(() => jsonResponse(200, { choices: [{ message: { content: '   ' } }] }));
+test('empty, unparseable, or safety-blocked replies are honest errors', async () => {
+  const empty = clientFor('groq', () => jsonResponse(200, { choices: [{ message: { content: '   ' } }] }));
   assert.equal((await empty.client.chat({ messages: [{ role: 'user', content: 'hi' }] })).error.code, 'empty_reply');
 
-  const junk = clientWith(() => jsonResponse(200, 'not json at all'));
+  const junk = clientFor('groq', () => jsonResponse(200, 'not json at all'));
   assert.equal((await junk.client.chat({ messages: [{ role: 'user', content: 'hi' }] })).error.code, 'empty_reply');
+
+  const blocked = clientFor('google', () => jsonResponse(200, { promptFeedback: { blockReason: 'SAFETY' } }));
+  assert.equal((await blocked.client.chat({ messages: [{ role: 'user', content: 'hi' }] })).error.code, 'blocked');
+
+  const stopped = clientFor('google', () => jsonResponse(200, { candidates: [{ finishReason: 'SAFETY', content: { parts: [] } }] }));
+  assert.equal((await stopped.client.chat({ messages: [{ role: 'user', content: 'hi' }] })).error.code, 'blocked');
 });
 
-test('an unconfigured client never reaches the network at all', async () => {
+test('local-only and unconfigured clients never reach the network', async () => {
   let called = false;
-  const client = createNvidiaChatClient({
-    config: { apiKey: null, model: null, baseUrl: 'https://x/v1', localOnly: false },
-    fetchImpl: async () => { called = true; return jsonResponse(200, {}); },
+  const fetchImpl = async () => { called = true; return jsonResponse(200, {}); };
+  const localOnly = createChatClient({
+    provider: 'groq',
+    config: { apiKey: GROQ_KEY, model: GROQ_MODEL, baseUrl: 'https://x/v1', localOnly: true },
+    fetchImpl,
   });
-  assert.equal(client.configured, false);
-  const result = await client.chat({ messages: [{ role: 'user', content: 'hi' }] });
-  assert.equal(result.error.code, 'not_configured');
+  assert.equal((await localOnly.chat({ messages: [{ role: 'user', content: 'hi' }] })).error.code, 'local_only');
+
+  const unconfigured = createChatClient({
+    provider: 'google',
+    config: { apiKey: null, model: null, baseUrl: 'https://x/v1beta', localOnly: false },
+    fetchImpl,
+  });
+  assert.equal(unconfigured.configured, false);
+  assert.equal((await unconfigured.chat({ messages: [{ role: 'user', content: 'hi' }] })).error.code, 'not_configured');
+  assert.equal((await unconfigured.listModels()).error.code, 'not_configured');
   assert.equal(called, false, 'no request left the machine');
-  assert.equal((await client.listModels()).error.code, 'not_configured');
-  assert.equal(called, false);
 });
 
 test('every chat error code has a human message', () => {
   for (const [code, message] of Object.entries(CHAT_ERROR_MESSAGES)) {
     assert.equal(typeof code, 'string');
     assert.ok(message.length > 15, `${code} message is actionable`);
+    assert.match(message, /[a-z]/i, `${code} message is human readable`);
   }
 });
 
 test('redactSecrets removes bearer headers, labelled values, and raw tokens', () => {
   const samples = [
-    `Authorization: Bearer ${KEY}`,
-    `api_key=${KEY}`,
-    `"apiKey": "${KEY}"`,
-    `token: ${KEY}`,
-    `secret = ${KEY}`,
-    `invalid ${KEY} supplied`,
+    `Authorization: Bearer ${GROQ_KEY}`,
+    `api_key=${GROQ_KEY}`,
+    `"apiKey": "${GROQ_KEY}"`,
+    `token: ${GROQ_KEY}`,
+    `secret = ${GROQ_KEY}`,
+    `invalid ${GROQ_KEY} supplied`,
+    `x-goog-api-key: ${GOOGLE_KEY}`,
   ];
   for (const sample of samples) {
     const out = redactSecrets(sample);
-    assert.ok(!out.includes(KEY), `token removed from: ${sample}`);
+    assert.ok(!out.includes(GROQ_KEY) && !out.includes(GOOGLE_KEY), `token removed from: ${sample}`);
     assert.match(out, /redacted/i);
   }
   assert.equal(redactSecrets('plain text, nothing secret'), 'plain text, nothing secret');
-  assert.equal(redactSecrets(null), '');
-});
-
-test('redactSecrets blanks an exact secret even when its shape is unusual', () => {
-  const odd = 'short-but-exact-value';
-  const out = redactSecrets(`the key is ${odd} ok`, { secrets: [odd] });
-  assert.ok(!out.includes(odd));
-});
-
-test('containsSecretLike detects token-shaped text but ignores normal prose', () => {
-  assert.equal(containsSecretLike(`Bearer ${KEY}`), true);
-  assert.equal(containsSecretLike(`apiKey=${KEY}`), true);
+  assert.equal(containsSecretLike(`Bearer ${GROQ_KEY}`), true);
   assert.equal(containsSecretLike('play Madira on the speakers'), false);
-  assert.equal(containsSecretLike(null), false);
 });

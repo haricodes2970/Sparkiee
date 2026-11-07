@@ -1,13 +1,16 @@
 /**
  * Environment sanitisation for child processes.
  *
- * Secrets that belong only to the daemon (such as the ElevenLabs key)
- * are stripped from any environment handed to other processes. The
- * desktop pet host only ever needs the runtime token, never provider
- * credentials.
+ * Secrets that belong only to the daemon (chat provider keys) are
+ * stripped from any environment handed to other processes. The desktop
+ * pet host only ever needs the runtime token, never provider credentials.
  */
 
-export const DAEMON_ONLY_SECRET_KEYS = Object.freeze(['ELEVENLABS_API_KEY', 'NVIDIA_API_KEY']);
+export const DAEMON_ONLY_SECRET_KEYS = Object.freeze([
+  'GROQ_API_KEY',
+  'GOOGLE_AI_API_KEY',
+  'GEMINI_API_KEY',
+]);
 
 /**
  * Returns a shallow copy of `env` without the daemon-only secret keys.

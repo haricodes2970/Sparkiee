@@ -16,26 +16,27 @@ import {
   resolveRuntimePaths,
 } from '../../core/src/index.mjs';
 import {
-  DEFAULT_MODEL_ID,
-  DEFAULT_OUTPUT_FORMAT,
-  DEFAULT_VOICE_ID,
+  VOICE_CATALOG,
   describeVoiceConfig,
-  isValidApiKey,
-  isValidVoiceId,
   loadVoiceConfig,
+  resolveTtsDataDir,
   resolveVoiceConfigPath,
-  writeVoiceConfig,
 } from '../../core/src/voice-config.mjs';
-import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
+import { createPiperTts } from '../../core/src/piper-tts.mjs';
+import { formatTaskDuration } from '../../core/src/pet-state.mjs';
+import { setupPiperEnvironment, DEFAULT_VOICE_SETUP_TIMEOUT_MS } from '../../core/src/tts-setup.mjs';
 import {
-  DEFAULT_NVIDIA_BASE_URL,
-  describeNvidiaConfig,
-  isValidNvidiaApiKey,
-  loadNvidiaConfig,
-  resolveNvidiaConfigPath,
-  writeNvidiaConfig,
-} from '../../core/src/nvidia-config.mjs';
-import { createNvidiaChatClient } from '../../core/src/chat-client.mjs';
+  CHAT_PROVIDERS,
+  CHAT_PROVIDER_INFO,
+  DEFAULT_CHAT_PROVIDER,
+  describeChatConfig,
+  isValidChatApiKey,
+  isValidChatModel,
+  loadChatConfig,
+  resolveChatConfigPath,
+  writeChatConfig,
+} from '../../core/src/chat-config.mjs';
+import { createChatClient } from '../../core/src/chat-client.mjs';
 import { setupSttEnvironment, MAX_SETUP_TIMEOUT_MS } from '../../core/src/stt-setup.mjs';
 import { createGnomeHotkeyInstaller } from '../../core/src/gnome-hotkey.mjs';
 import { describeSpeechError } from '../../server/src/voice-service.mjs';
@@ -85,20 +86,26 @@ Commands:
   stop         Stop the local runtime
   status       Show whether the local runtime is running
   ptt toggle   Start or stop a push-to-talk recording (used by the OS keybinding)
-  assistant setup  Connect the chat assistant: store the NVIDIA API key (never
-               echoed), verify it, and pick a model from the live list
+  assistant setup [--provider groq|google]
+               Connect the chat assistant: store a Groq or Google AI Studio API
+               key (never echoed), verify it, and pick a model from the live list
   assistant setup --remove
-               Forget the stored NVIDIA key (unrelated settings preserved)
+               Forget the active provider's key (the other provider is kept)
   assistant status
-               Show honest, separate readiness for mic, STT, NVIDIA, TTS
+               Show honest, separate readiness for mic, STT, chat, TTS
   assistant reset
                Forget the in-memory conversation history
   assistant stt-setup  One-time local speech-recognition setup (venv + model;
                        use --model large-v3-turbo for higher accuracy)
   assistant hotkey install|status|remove
                Manage the GNOME media-keys fallback binding for the mic shortcut
+  pet dock     Pin Sparky on the OpenCode chatbox and nap until a task starts
+  pet undock   Return Sparky to the desktop
+  pet sleep    Put Sparky to sleep where she is
+  pet wake     Wake Sparky without moving her
+  pet status   Show dock posture and the tracked task timer
   voice status Show whether Sparky's spoken voice is configured
-  voice setup  Store the ElevenLabs API key (never echoed)
+  voice setup  Install the free local voice (Piper) and download voice models
   voice test   Speak a short test phrase on the desktop pet
   voice mute   Mute all sound (captions keep working)
   voice unmute Unmute sound
@@ -112,8 +119,9 @@ Environment:
   SPARKIEE_PORT   HTTP port (default: ${DEFAULT_PORT})
   SPARKIEE_HOME   Runtime state directory (default: $XDG_STATE_HOME/sparkiee
                   or ~/.local/state/sparkiee)
-  ELEVENLABS_API_KEY  Optional voice-provider key (overrides voice setup)
-  NVIDIA_API_KEY      Optional chat key (overrides assistant setup; daemon only)
+  SPARKIEE_TTS_SPEED  Speaking speed for the local voice (0.5-2.0, default 1.0)
+  GROQ_API_KEY        Optional Groq chat key (overrides assistant setup)
+  GOOGLE_AI_API_KEY   Optional Google AI Studio chat key (alias: GEMINI_API_KEY)
 `;
 }
 
@@ -142,7 +150,11 @@ async function readLog(paths) {
 
 async function getRuntime(port) {
   try {
-    const { response, payload } = await fetchJson(`http://${DEFAULT_HOST}:${port}/api/v1/runtime`);
+    const { response, payload } = await fetchJson(`http://${DEFAULT_HOST}:${port}/api/v1/runtime`, {
+      // A cold daemon that is still walking the music library can briefly
+      // miss a sub-second probe. Two seconds stays honest without leaking.
+      signal: AbortSignal.timeout(2_000),
+    });
     if (response.ok && payload?.name === 'Sparkiee') return payload;
   } catch {
     // Not running; the caller decides whether this is an error.
@@ -296,22 +308,41 @@ async function stop(env) {
   const port = resolvePort(env);
   const paths = resolveRuntimePaths(env);
   const runtime = await getRuntime(port);
+  const pid = Number((await readFile(paths.pidFile, 'utf8').catch(() => '0')).trim());
+  let token = null;
   if (!runtime) {
-    await removeStalePidFile(paths);
-    process.stdout.write(`Sparkiee is not running at http://${DEFAULT_HOST}:${port}.\n`);
-    return;
+    // A busy daemon (initial music scan can starve the event loop) may miss
+    // the short status probe while still being alive. With a valid runtime
+    // token and a live pid, attempt the real shutdown anyway instead of
+    // pretending it is not running and leaking the process.
+    if (Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) {
+      try {
+        token = await readAuthToken(paths);
+      } catch {
+        token = null;
+      }
+    }
+    if (!token) {
+      await removeStalePidFile(paths);
+      process.stdout.write(`Sparkiee is not running at http://${DEFAULT_HOST}:${port}.\n`);
+      return;
+    }
+  } else {
+    token = await readAuthToken(paths);
   }
 
-  const token = await readAuthToken(paths);
   const { response, payload } = await fetchJson(`http://${DEFAULT_HOST}:${port}/api/v1/shutdown`, {
     method: 'POST',
     headers: { authorization: `Bearer ${token}` },
   });
   if (!response.ok) throw new Error(payload?.error ?? `Runtime shutdown failed with HTTP ${response.status}.`);
 
-  const deadline = Date.now() + 3_000;
+  const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    if (!(await getRuntime(port))) {
+    const gone = Number.isInteger(pid) && pid > 0
+      ? !isPidAlive(pid)
+      : !(await getRuntime(port));
+    if (gone) {
       await removeStalePidFile(paths);
       process.stdout.write('Sparkiee stopped.\n');
       return;
@@ -332,11 +363,10 @@ async function removeStalePidFile(paths) {
 }
 
 // ---------------------------------------------------------------------------
-// Voice commands: configure and control Sparky's spoken voice without ever
-// printing the API key.
+// Voice commands: install and control Sparky's local, free voice.
 // ---------------------------------------------------------------------------
 
-/** Read a secret from the terminal without echoing it. */
+/** Read a secret from the terminal without echoing it (chat keys only). */
 function promptHidden(question) {
   return new Promise((resolve) => {
     const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
@@ -353,23 +383,40 @@ function promptHidden(question) {
   });
 }
 
+async function probeVoiceEngine(env, described) {
+  const engine = createPiperTts({ env, getConfig: () => described });
+  try {
+    return await engine.probe();
+  } finally {
+    await engine.close().catch(() => {});
+  }
+}
+
+function voiceRow(language, voiceId) {
+  const meta = VOICE_CATALOG[voiceId];
+  return `${language === 'hi' ? 'Hindi' : 'English'} voice  : ${meta?.label ?? voiceId}${meta ? ` [${meta.license}]` : ''}\n`;
+}
+
 async function voiceStatus(env) {
   const loaded = await loadVoiceConfig({ env });
   const described = describeVoiceConfig(loaded);
+  const engine = await probeVoiceEngine(env, described);
   process.stdout.write(
-    `Voice provider: ElevenLabs\n` +
-    `Configured: ${described.configured ? `yes (from ${described.source})` : 'no — original chirps are in use'}\n` +
-    `Voice id: ${described.voiceId}${described.voiceId === DEFAULT_VOICE_ID ? ' (Sparky default)' : ''}\n` +
-    `Model: ${described.modelId}\n` +
-    `Output: ${described.outputFormat}\n` +
-    `Config file: ${resolveVoiceConfigPath(env)}\n`,
+    `Voice engine     : piper (local, free, no account)\n` +
+    `Runtime          : ${engine?.status ?? 'unknown'}${engine?.installed === false ? ' — run "sparkiee voice setup"' : ''}\n` +
+    voiceRow('hi', described.voices.hi) +
+    voiceRow('en', described.voices.en) +
+    `Speed            : ${described.speed.toFixed(2)}x\n` +
+    `Data directory   : ${resolveTtsDataDir(env)}\n` +
+    `Config file      : ${resolveVoiceConfigPath(env)}\n` +
+    `Detail           : ${engine?.detail ?? 'engine status unavailable'}\n`,
   );
   for (const warning of described.warnings) process.stdout.write(`Warning: ${warning}\n`);
-  if (!described.configured) {
-    process.stdout.write(`Set the key with ELEVENLABS_API_KEY or "sparkiee voice setup".\n`);
+  if (engine?.status !== 'ready') {
+    process.stdout.write(`Install it with "sparkiee voice setup".\n`);
   }
 
-  // Daemon-side view when the runtime is up (never contains secrets).
+  // Daemon-side view when the runtime is up.
   const port = resolvePort(env);
   const runtime = await getRuntime(port);
   if (!runtime) {
@@ -383,10 +430,10 @@ async function voiceStatus(env) {
     const state = await fetchJson(`http://${DEFAULT_HOST}:${port}/api/v1/pet/state`);
     const speech = state.payload?.settings?.speech ?? {};
     process.stdout.write(
-      `Runtime: daemon sees provider ${voice.configured ? 'configured' : 'not configured'}\n` +
-      `Spoken reactions: ${speech.enabled === false ? 'disabled' : `enabled (${speech.style ?? 'speech'} style)`}\n` +
-      `Sound: ${state.payload?.settings?.audio?.enabled === false ? 'muted (captions keep working)' : 'on'}\n` +
-      `Speech cache: ${voice.cacheFiles ?? 0} clips (${Math.round((voice.cacheBytes ?? 0) / 1024)} KB)\n` +
+      `Runtime voice    : ${voice.configured ? `ready (${voice.provider})` : 'not ready'}\n` +
+      `Spoken reactions : ${speech.enabled === false ? 'disabled' : `enabled (${speech.style ?? 'speech'} style)`}\n` +
+      `Sound            : ${state.payload?.settings?.audio?.enabled === false ? 'muted (captions keep working)' : 'on'}\n` +
+      `Speech cache     : ${voice.cacheFiles ?? 0} clips (${Math.round((voice.cacheBytes ?? 0) / 1024)} KB)\n` +
       (voice.lastError ? `Last speech error: ${describeSpeechError(voice.lastError)}\n` : ''),
     );
     for (const warning of payload.warnings ?? []) process.stdout.write(`Runtime warning: ${warning}\n`);
@@ -396,62 +443,39 @@ async function voiceStatus(env) {
 }
 
 async function voiceSetup(env, args) {
-  let keyFile = null;
-  let verify = true;
+  let timeoutMs = DEFAULT_VOICE_SETUP_TIMEOUT_MS;
   for (let index = 0; index < args.length; index += 1) {
-    if (args[index] === '--key-file') {
-      keyFile = args[index + 1];
+    const arg = args[index];
+    if (arg === '--timeout-ms') {
+      const raw = args[index + 1];
+      if (!raw) throw new Error('--timeout-ms requires a value.');
+      timeoutMs = Number(raw);
+      if (!Number.isInteger(timeoutMs) || timeoutMs < 5_000 || timeoutMs > 60 * 60 * 1000) {
+        throw new Error(`Invalid --timeout-ms "${raw}". Expected an integer from 5000 to 3600000.`);
+      }
       index += 1;
-      if (!keyFile) throw new Error('--key-file requires a path.');
-    } else if (args[index] === '--no-verify') {
-      verify = false;
     } else {
-      throw new Error(`Unknown option "${args[index]}". Usage: sparkiee voice setup [--key-file <path>] [--no-verify]`);
+      throw new Error(`Unknown option "${arg}". Usage: sparkiee voice setup [--timeout-ms <ms>]`);
     }
   }
 
-  let key = null;
-  if (keyFile) {
-    key = (await readFile(path.resolve(keyFile), 'utf8')).trim();
-  } else if (!process.stdin.isTTY) {
-    // Piped input: echo "$KEY" | sparkiee voice setup
-    const chunks = [];
-    for await (const chunk of process.stdin) chunks.push(chunk);
-    key = Buffer.concat(chunks).toString('utf8').trim();
-  } else {
-    key = await promptHidden('ElevenLabs API key (input hidden): ');
-  }
-  if (!isValidApiKey(key)) {
-    throw new Error('That does not look like an ElevenLabs API key (expected 20-256 letters, digits, - or _).');
-  }
-
-  const voiceId = env.SPARKIEE_VOICE_ID && isValidVoiceId(env.SPARKIEE_VOICE_ID) ? env.SPARKIEE_VOICE_ID : DEFAULT_VOICE_ID;
-  const modelId = typeof env.SPARKIEE_VOICE_MODEL === 'string' && /^[a-z0-9_]{3,64}$/.test(env.SPARKIEE_VOICE_MODEL)
-    ? env.SPARKIEE_VOICE_MODEL
-    : DEFAULT_MODEL_ID;
-
-  if (verify) {
-    process.stdout.write('Verifying the key and voice with ElevenLabs (no credits used)…\n');
-    const client = createElevenLabsClient({ config: { apiKey: key, voiceId, modelId, outputFormat: DEFAULT_OUTPUT_FORMAT } });
-    const result = await client.verify();
-    if (result.code === 'auth') {
-      throw new Error('ElevenLabs rejected that key. Double-check it and run "sparkiee voice setup" again. Nothing was saved.');
-    }
-    if (result.code === 'validation') {
-      throw new Error(`${result.message} Nothing was saved. Use SPARKIEE_VOICE_ID to pick another voice.`);
-    }
-    if (!result.ok) {
-      process.stdout.write(`Warning: could not verify right now (${result.message}). Saving anyway — run "sparkiee voice status" later.\n`);
-    } else {
-      process.stdout.write(`Voice verified${result.name ? `: “${result.name}”` : ''}.\n`);
-    }
-  }
-
-  const file = await writeVoiceConfig({ env, apiKey: key, voiceId, modelId, outputFormat: DEFAULT_OUTPUT_FORMAT });
   process.stdout.write(
-    `Key saved (${key.length} characters, never logged) to ${file} with 0600 permissions.\n` +
-    `Try it: "sparkiee voice test" (uses a few credits) or press Test spoken voice in the dashboard.\n`,
+    `Installing the local Piper voice (no account, no key).\n` +
+    `Downloads: piper-tts from PyPI, then two voices (~60 MB each) from ${'rhasspy/piper-voices'}.\n\n`,
   );
+  const result = await setupPiperEnvironment({
+    env,
+    timeoutMs,
+    onLine: (line) => process.stdout.write(`${line}\n`),
+  });
+  if (!result.ok) {
+    throw new Error(`Voice setup did not finish: ${result.detail}`);
+  }
+  process.stdout.write(
+    `\n${result.detail}\n` +
+    `Try it: "sparkiee voice test" or press Test spoken voice in the dashboard.\n`,
+  );
+  await nudgeDaemon(env);
 }
 
 async function requireDaemon(env) {
@@ -471,6 +495,9 @@ async function voiceTest(env) {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: '{}',
+    // Cold start loads the Piper model (often 1-3 s on a busy CPU), and a
+    // generated test is worth waiting for instead of a misleading abort.
+    signal: AbortSignal.timeout(20_000),
   });
   if (response.status === 429) throw new Error(payload?.error ?? 'Too many voice test requests — wait a moment.');
   if (!response.ok) throw new Error(payload?.error ?? `Voice test failed with HTTP ${response.status}.`);
@@ -508,6 +535,49 @@ async function voiceMute(env, unmute) {
 // binding runs (Stage 2): it must be short, token-authed (loopback only, key
 // never leaves the state dir), and must never print secrets.
 // ---------------------------------------------------------------------------
+
+async function petCommand(subcommand, env) {
+  const { port, token } = await requireDaemon(env);
+  const base = `http://${DEFAULT_HOST}:${port}`;
+  const authHeaders = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+  if (subcommand === 'status') {
+    const { payload } = await fetchJson(`${base}/api/v1/pet/state`);
+    const task = payload?.task;
+    let taskText = 'no task tracked';
+    if (task?.active === true) taskText = `working (${formatTaskDuration(Date.now() - Date.parse(task.startedAt))})`;
+    else if (task?.outcome === 'success') taskText = `last task completed in ${formatTaskDuration(task.durationMs)}`;
+    else if (task?.outcome === 'error') taskText = 'last task failed';
+    process.stdout.write(
+      `Sparky is ${payload?.docked === true ? 'docked on the OpenCode chatbox' : 'on the desktop'}.\n` +
+      `Task: ${taskText}\n`,
+    );
+    return;
+  }
+  if (subcommand === 'dock' || subcommand === 'undock') {
+    const docked = subcommand === 'dock';
+    const { response, payload } = await fetchJson(`${base}/api/v1/pet/dock`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ docked }),
+    });
+    if (!response.ok) throw new Error(payload?.error ?? `Runtime returned HTTP ${response.status}`);
+    process.stdout.write(docked
+      ? 'Sparky is docked on the OpenCode chatbox and will nap until a task starts.\nDrag the sleeping pet to fine-tune the spot; it is remembered per display.\n'
+      : 'Sparky is back on the desktop.\n');
+    return;
+  }
+  if (subcommand === 'sleep' || subcommand === 'wake') {
+    const { response, payload } = await fetchJson(`${base}/api/v1/pet/command`, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ command: subcommand }),
+    });
+    if (!response.ok) throw new Error(payload?.error ?? `Runtime returned HTTP ${response.status}`);
+    process.stdout.write(`Sparky: ${payload.pet.message}\n`);
+    return;
+  }
+  throw new Error(`Unknown pet command "${subcommand}". Try: pet dock, pet undock, pet sleep, pet wake, pet status.`);
+}
 
 async function pttToggle(env) {
   const port = resolvePort(env);
@@ -653,10 +723,10 @@ async function assistantSttSetup(env, args) {
 }
 
 // ---------------------------------------------------------------------------
-// Conversational assistant setup (NVIDIA). The key is read hidden, verified
-// against the live model list, and stored 0600 under the per-user config
-// directory. It is never printed, never written to a tracked file, and never
-// sent anywhere except NVIDIA's own API when Sparky is asked to chat.
+// Conversational assistant setup (Groq / Google AI Studio). The key is read
+// hidden, verified against the live model list, and stored 0600 under the
+// per-user config directory. It is never printed, never written to a tracked
+// file, and only ever sent to the provider the user picked.
 // ---------------------------------------------------------------------------
 
 /** Keep candidate chat models, dropping embedding/vision/audio-only entries. */
@@ -666,14 +736,30 @@ export function rankChatModels(models) {
 }
 
 function parseAssistantSetupArgs(args) {
-  const options = { remove: false, verify: true, keyFile: null, model: null, localOnly: false };
+  const options = {
+    remove: false,
+    verify: true,
+    keyFile: null,
+    model: null,
+    localOnly: false,
+    allowRemote: false,
+    provider: null,
+  };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === '--remove') options.remove = true;
     else if (arg === '--no-verify') options.verify = false;
     else if (arg === '--local-only') options.localOnly = true;
-    else if (arg === '--allow-remote') options.localOnly = false;
-    else if (arg === '--key-file') {
+    else if (arg === '--allow-remote') options.allowRemote = true;
+    else if (arg === '--provider') {
+      const raw = args[index + 1];
+      if (!raw) throw new Error(`--provider requires a value: ${CHAT_PROVIDERS.join(' | ')}.`);
+      if (!CHAT_PROVIDERS.includes(raw)) {
+        throw new Error(`Unknown provider "${raw}". Choose one of: ${CHAT_PROVIDERS.join(', ')}.`);
+      }
+      options.provider = raw;
+      index += 1;
+    } else if (arg === '--key-file') {
       options.keyFile = args[index + 1];
       index += 1;
       if (!options.keyFile) throw new Error('--key-file requires a path.');
@@ -684,41 +770,58 @@ function parseAssistantSetupArgs(args) {
     } else if (arg === '--stt') {
       options.stt = true;
     } else {
-      throw new Error(`Unknown option "${arg}". Usage: sparkiee assistant setup [--key-file <path>] [--model <id>] [--no-verify] [--local-only] [--remove]`);
+      throw new Error(`Unknown option "${arg}". Usage: sparkiee assistant setup [--provider groq|google] [--key-file <path>] [--model <id>] [--no-verify] [--local-only] [--allow-remote] [--remove]`);
     }
+  }
+  if (options.localOnly && options.allowRemote) {
+    throw new Error('--local-only and --allow-remote contradict each other.');
   }
   return options;
 }
 
-async function readSecretInput(keyFile) {
+async function readSecretInput(keyFile, label = 'Chat provider') {
   if (keyFile) return (await readFile(path.resolve(keyFile), 'utf8')).trim();
   if (!process.stdin.isTTY) {
     const chunks = [];
     for await (const chunk of process.stdin) chunks.push(chunk);
     return Buffer.concat(chunks).toString('utf8').trim();
   }
-  return promptHidden('NVIDIA API key (input hidden, never logged): ');
+  return promptHidden(`${label} API key (input hidden, never logged): `);
+}
+
+/** Ask which provider to configure; non-interactive runs default to Groq. */
+async function chooseChatProvider(requested) {
+  if (requested) return requested;
+  if (!process.stdin.isTTY) return DEFAULT_CHAT_PROVIDER;
+  const answer = await promptVisible(
+    `Chat provider — 1) Groq (${CHAT_PROVIDER_INFO.groq.modelHint})  2) Google AI Studio (${CHAT_PROVIDER_INFO.google.modelHint}) [1]: `,
+  );
+  if (answer.length === 0 || answer === '1' || answer.toLowerCase() === 'groq') return 'groq';
+  if (answer === '2' || answer.toLowerCase() === 'google') return 'google';
+  throw new Error(`"${answer}" is not a provider. Choose 1 (Groq) or 2 (Google AI Studio).`);
 }
 
 /** Choose a model the live API actually offers — never a hardcoded guess. */
-async function chooseNvidiaModel(client, models, requested) {
+async function chooseChatModel(provider, client, models, requested) {
   const candidates = rankChatModels(models);
   if (requested) {
     if (!models.includes(requested)) {
-      throw new Error(`The API does not list the model "${requested}". Run "sparkiee assistant setup" without --model to pick from the live list.`);
+      throw new Error(`The API does not list the model "${requested}". Run "sparkiee assistant setup --provider ${provider}" without --model to pick from the live list.`);
     }
     return requested;
   }
   if (candidates.length === 0) {
-    throw new Error('The NVIDIA account lists no chat models. Pass --model <id> to choose one explicitly.');
+    throw new Error(`${CHAT_PROVIDER_INFO[provider].label} lists no chat models. Pass --model <id> to choose one explicitly.`);
   }
+  const hint = CHAT_PROVIDER_INFO[provider].modelHint;
+  if (candidates.includes(hint)) return hint;
   if (!process.stdin.isTTY) {
     throw new Error(`Pick a model with --model <id>. Available (first 10): ${candidates.slice(0, 10).join(', ')}`);
   }
   const shown = candidates.slice(0, 25);
   process.stdout.write('Available chat models:\n');
   shown.forEach((id, index) => process.stdout.write(`  ${String(index + 1).padStart(2)}. ${id}\n`));
-  const suggestedIndex = Math.max(0, shown.findIndex((id) => /instruct/i.test(id)));
+  const suggestedIndex = Math.max(0, shown.findIndex((id) => /instruct|flash/i.test(id)));
   const answer = await promptVisible(`Model [${suggestedIndex + 1}] "${shown[suggestedIndex]}": `);
   if (answer.length === 0) return shown[suggestedIndex];
   const asNumber = Number(answer);
@@ -746,51 +849,61 @@ async function assistantSetup(env, args) {
   }
 
   if (options.remove) {
-    await writeNvidiaConfig({ env, patch: { apiKey: null, model: null } });
+    const loaded = await loadChatConfig({ env });
+    const provider = options.provider ?? loaded.provider;
+    await writeChatConfig({ env, patch: { provider, clearProvider: true } });
     process.stdout.write(
-      'NVIDIA key removed. Sparky will say it is not set up instead of guessing an answer.\n' +
-      `Config file: ${resolveNvidiaConfigPath(env)} (unrelated settings preserved).\n`,
+      `${CHAT_PROVIDER_INFO[provider].label} key removed. Sparky will say it is not set up instead of guessing an answer.\n` +
+      `Config file: ${resolveChatConfigPath(env)} (the other provider's key is preserved).\n`,
     );
     await nudgeDaemon(env);
     return;
   }
 
-  const key = await readSecretInput(options.keyFile);
-  if (!isValidNvidiaApiKey(key)) {
-    throw new Error('That does not look like an NVIDIA API key (expected "nvapi-…" or a 40+ character token). Nothing was saved.');
+  const provider = await chooseChatProvider(options.provider);
+  const info = CHAT_PROVIDER_INFO[provider];
+  const key = await readSecretInput(options.keyFile, info.label);
+  if (!isValidChatApiKey(provider, key)) {
+    throw new Error(`That does not look like a ${info.label} API key. Nothing was saved.`);
   }
 
-  const baseUrl = DEFAULT_NVIDIA_BASE_URL;
   let model = options.model;
+  if (model && !isValidChatModel(model)) {
+    throw new Error(`"${model}" is not a plausible model id. Nothing was saved.`);
+  }
   if (options.verify) {
-    process.stdout.write('Verifying the key against NVIDIA and reading the live model list…\n');
-    const probe = createNvidiaChatClient({ config: { apiKey: key, model: null, baseUrl, localOnly: false } });
+    process.stdout.write(`Verifying the key against ${info.label} and reading the live model list…\n`);
+    const probe = createChatClient({ provider, config: { apiKey: key, model: null, baseUrl: info.baseUrl, localOnly: false } });
     const listed = await probe.listModels();
     if (!listed.ok) {
       if (listed.error.code === 'auth') {
-        throw new Error('NVIDIA rejected that key. Double-check it and run "sparkiee assistant setup" again. Nothing was saved.');
+        throw new Error(`${info.label} rejected that key. Double-check it and run "sparkiee assistant setup" again. Nothing was saved.`);
       }
       process.stdout.write(`Warning: could not list models right now (${listed.error.message}).\n`);
       if (!model) {
         throw new Error('A model id is required and the live list was unavailable. Re-run with --model <id>. Nothing was saved.');
       }
     } else {
-      process.stdout.write(`NVIDIA accepted the key (${listed.models.length} models available).\n`);
-      model = await chooseNvidiaModel(probe, listed.models, options.model);
+      process.stdout.write(`${info.label} accepted the key (${listed.models.length} models available).\n`);
+      model = await chooseChatModel(provider, probe, listed.models, model);
     }
   }
   if (!model) {
     throw new Error('No model selected. Re-run with --model <id>, or allow verification to list the live models.');
   }
 
-  const file = await writeNvidiaConfig({
-    env,
-    patch: { apiKey: key, model, baseUrl, localOnly: options.localOnly ? true : null },
-  });
+  const patch = { provider, apiKey: key, model };
+  if (options.localOnly) patch.localOnly = true;
+  else if (options.allowRemote) patch.localOnly = false;
+  const file = await writeChatConfig({ env, patch });
+  const localOnly = options.localOnly ? true : (options.allowRemote ? false : null);
   process.stdout.write(
     `Key saved (${key.length} characters, never logged) to ${file} with 0600 permissions.\n` +
+    `Provider: ${info.label}\n` +
     `Model: ${model}\n` +
-    `Local-only mode: ${options.localOnly ? 'on — nothing is sent to NVIDIA until you turn it off' : 'off — chat requests go to NVIDIA'}\n` +
+    (localOnly === null
+      ? 'Local-only mode: unchanged.\n'
+      : `Local-only mode: ${localOnly ? 'on — nothing is sent to any provider until you turn it off' : 'off — chat requests go to the provider'}\n`) +
     'Try it: press Ctrl+Alt+Space and ask a question, or type one in the dashboard.\n',
   );
   await nudgeDaemon(env);
@@ -807,8 +920,8 @@ async function nudgeDaemon(env) {
 }
 
 async function assistantStatus(env) {
-  const loaded = await loadNvidiaConfig({ env });
-  const described = describeNvidiaConfig(loaded);
+  const loaded = await loadChatConfig({ env });
+  const described = describeChatConfig(loaded);
   const port = resolvePort(env);
   const runtime = await getRuntime(port);
 
@@ -831,17 +944,27 @@ async function assistantStatus(env) {
     if (vs.response.ok) voice = vs.payload.voice ?? null;
   }
 
+  const active = conversation ?? described;
+  const providerRow = (id) => {
+    const entry = described.providers?.[id] ?? { configured: false, model: null };
+    const marker = (active.provider ?? described.provider) === id ? '*' : ' ';
+    const state = entry.configured ? `ready (${entry.model})` : 'not set up';
+    return `  ${marker} ${CHAT_PROVIDER_INFO[id].label.padEnd(17)}: ${state}\n`;
+  };
+
   process.stdout.write(
     'Sparkiee assistant readiness\n' +
     `  Assistant state  : ${assistantState ?? (runtime ? 'unknown' : 'runtime not running')}\n` +
     `  Microphone input : ${mic ? (mic.devices?.length ? `${mic.devices.length} device(s) available` : 'no input device found') : (runtime ? 'unknown' : 'runtime not running')}\n` +
     `  Local STT        : ${stt ? stt.status : (runtime ? 'unknown' : 'runtime not running')}${stt?.model ? ` (${stt.model})` : ''}\n` +
-    `  NVIDIA chat      : ${conversation ? (conversation.configured ? `ready (${conversation.model})` : 'not set up') : (described.configured ? 'configured (daemon not refreshed yet)' : 'not set up')}\n` +
+    `  Chat providers   : (* = active)\n` +
+    providerRow('groq') +
+    providerRow('google') +
     `  Local-only mode  : ${(conversation?.localOnly ?? described.localOnly) ? 'on (no transcript leaves this machine)' : 'off'}\n` +
-    `  ElevenLabs TTS   : ${voice ? (voice.configured ? 'ready' : 'no cloud key') : (runtime ? 'unknown' : 'runtime not running')}\n` +
-    `  Local TTS fallback: ${voice?.localFallback ? (voice.localFallback.available ? `ready (${voice.localFallback.binary ?? 'espeak-ng'})` : 'unavailable') : (runtime ? 'unknown' : 'runtime not running')}\n` +
+    `  Local voice      : ${voice ? (voice.configured ? `ready (${voice.provider ?? 'piper'})` : 'not set up') : (runtime ? 'unknown' : 'runtime not running')}\n` +
+    `  Voice fallback   : ${voice?.localFallback ? (voice.localFallback.available ? `ready (${voice.localFallback.binary ?? 'espeak-ng'})` : 'unavailable') : (runtime ? 'unknown' : 'runtime not running')}\n` +
     `  Wake word        : ${wake ? wake.status : (runtime ? 'unknown' : 'runtime not running')}\n` +
-    `  NVIDIA key file  : ${resolveNvidiaConfigPath(env)}\n`,
+    `  Chat config file : ${resolveChatConfigPath(env)}\n`,
   );
   for (const warning of described.warnings) process.stdout.write(`  Warning: ${warning}\n`);
   if (conversation?.lastError) process.stdout.write(`  Last chat error: ${conversation.lastError}\n`);
@@ -889,6 +1012,10 @@ export async function runCli(argv, env = process.env) {
   }
   if (command === 'assistant') {
     await runAssistantCommand(argv[1] ?? 'status', argv.slice(2), env);
+    return;
+  }
+  if (command === 'pet') {
+    await petCommand(argv[1] ?? 'status', env);
     return;
   }
   if (command === 'ptt' && argv[1] === 'toggle') {

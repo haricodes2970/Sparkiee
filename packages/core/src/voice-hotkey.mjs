@@ -6,7 +6,7 @@
  * Safety choices:
  * - The accelerator is an allowlist, not a free-form string: a saved hotkey
  *   can never commandeer arbitrary desktop key combos.
- * - Settings live in the same 0600 user config directory as the ElevenLabs
+ * - Settings live in the same 0600 user config directory as the local
  *   voice config (`$XDG_CONFIG_HOME/sparkiee/assistant.json`).
  * - The decision logic is pure so conflicting presses (mic busy, another
  *   capture in flight) resolve deterministically without a second daemon

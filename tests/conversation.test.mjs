@@ -43,7 +43,7 @@ function fakeChatProvider({ configured = true, localOnly = false, reply = 'Four.
     configured: () => configured,
     describe: () => {
       calls.describe += 1;
-      return { configured, source: 'file', model: 'meta/llama-3.1-8b-instruct', baseUrl: 'https://integrate.api.nvidia.com/v1', localOnly };
+      return { configured, source: 'file', model: 'meta/llama-3.1-8b-instruct', baseUrl: 'https://api.groq.com/openai/v1', localOnly };
     },
     async chat(messages) {
       calls.chat.push(messages);
@@ -86,7 +86,7 @@ function voiceStub() {
       return { id, clipId: 'a'.repeat(64), status: 'played', detail: '900ms', at: new Date().toISOString() };
     },
     async status() {
-      return { configured: true, provider: 'elevenlabs' };
+      return { configured: true, provider: 'piper' };
     },
   };
 }
@@ -173,7 +173,7 @@ test('local-only mode never sends a transcript and says why', async () => {
 });
 
 test('a provider failure becomes an honest spoken error, never a fabricated answer', async () => {
-  const chat = fakeChatProvider({ error: { code: 'rate_limited', message: 'NVIDIA is rate limiting this key. Wait a moment and try again.' } });
+  const chat = fakeChatProvider({ error: { code: 'rate_limited', message: 'The provider is rate limiting this key. Wait a moment and try again.' } });
   const voice = voiceStub();
   const instance = await startServer({ musicService: musicStub(), chatProvider: chat, voiceService: voice, assistantThrottleMs: 0 });
   try {
@@ -375,14 +375,14 @@ test('the real voice service records honest playback outcomes and releases waite
   assert.equal(timedOut, null);
 });
 
-test('a muted pet gets a caption, no provider call, and an honest muted error', async () => {
+test('a muted pet gets a caption, no engine call, and an honest muted error', async () => {
   const petController = createPetController();
   petController.updateSettings({ audio: { enabled: false } });
-  let clientCalls = 0;
+  let engineCalls = 0;
   const cache = { async stats() { return { bytes: 0, files: 0 }; }, async lookup() { return null; }, async put() { return true; } };
   const service = createVoiceService({
-    getConfig: () => ({ configured: true, config: { apiKey: 'sk_x'.repeat(10), voiceId: 'v', modelId: 'm', outputFormat: 'mp3_44100_128' } }),
-    getClient: () => ({ synthesize: async () => { clientCalls += 1; return { ok: true, bytes: Buffer.alloc(1), mime: 'audio/mpeg' }; } }),
+    getConfig: () => ({ configured: true, config: { voices: { hi: 'hi_IN-priyamvada-medium', en: 'en_US-lessac-medium' }, speed: 1 } }),
+    getEngine: () => ({ synthesize: async () => { engineCalls += 1; return { ok: true, audio: Buffer.alloc(1), mime: 'audio/wav' }; } }),
     cache,
     petController,
     localTts: null,
@@ -390,23 +390,23 @@ test('a muted pet gets a caption, no provider call, and an honest muted error', 
   const result = await service.speak('hello there');
   assert.equal(result.speech.error, 'muted');
   assert.equal(result.speech.clipId, null);
-  assert.equal(clientCalls, 0, 'muted speech spends nothing');
+  assert.equal(engineCalls, 0, 'muted speech never starts the engine');
   assert.equal((await service.status()).lastError, 'muted');
 });
 
-test('a working local fallback makes speech ready without any cloud key', async () => {
+test('a working local fallback makes speech ready without Piper', async () => {
   const petController = createPetController();
   const cache = { async stats() { return { bytes: 0, files: 0 }; }, async lookup() { return null; }, async put() { return true; } };
   const service = createVoiceService({
-    getConfig: () => ({ configured: false, config: { apiKey: null, voiceId: 'v', modelId: 'm', outputFormat: 'mp3_44100_128' } }),
-    getClient: () => null,
+    getConfig: () => ({ configured: false, config: { voices: { hi: 'hi_IN-priyamvada-medium', en: 'en_US-lessac-medium' }, speed: 1 } }),
+    getEngine: () => null,
     cache,
     petController,
     localTts: { voice: 'en-us', speed: 165, synthesize: async () => ({ ok: true, bytes: Buffer.alloc(4), mime: 'audio/wav' }) },
     getLocalTtsStatus: async () => ({ provider: 'espeak-ng', status: 'ready', binary: '/usr/bin/espeak-ng', version: '1.52', detail: null }),
   });
   const status = await service.status();
-  assert.equal(status.configured, false, 'no cloud key');
+  assert.equal(status.configured, false, 'Piper is not configured');
   assert.equal(status.provider, 'espeak-ng', 'the honest provider is the local one');
   assert.equal(status.localFallback.available, true);
   assert.equal(status.localFallback.binary, '/usr/bin/espeak-ng');

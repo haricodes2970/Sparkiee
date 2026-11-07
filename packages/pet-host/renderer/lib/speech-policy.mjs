@@ -17,7 +17,7 @@ export function readSpeechSettings(state) {
   const speech = state && state.settings ? state.settings.speech : null;
   return {
     enabled: speech ? speech.enabled !== false : true,
-    provider: speech && speech.provider === 'chirps' ? 'chirps' : 'elevenlabs',
+    provider: speech && speech.provider === 'chirps' ? 'chirps' : 'piper',
     style: speech && ['speech', 'chirps', 'both'].includes(speech.style) ? speech.style : 'speech',
     ready: Boolean(state && state.speechReady),
   };
@@ -27,7 +27,7 @@ export function readSpeechSettings(state) {
 export function speechCarriesReactions(state) {
   const settings = readSpeechSettings(state);
   return settings.enabled
-    && settings.provider === 'elevenlabs'
+    && settings.provider === 'piper'
     && settings.style === 'speech'
     && settings.ready;
 }

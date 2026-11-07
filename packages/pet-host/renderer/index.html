@@ -10,6 +10,11 @@
 </head>
 <body>
   <main id="pet-root" aria-label="Sparkiee desktop pet">
+    <div class="task-collar" id="task-collar" hidden>
+      <span class="task-collar-dot" aria-hidden="true"></span>
+      <span id="task-collar-label">Working</span>
+      <span id="task-collar-time" class="task-collar-time">0:00</span>
+    </div>
     <button class="pet-button" id="pet-button" type="button" aria-label="Ask your Sparkiee pet to wave" title="Click for a wave, drag to move">
       <div class="pet-sprite" id="pet-sprite" role="img" aria-label="Animated pixel creature"></div>
     </button>
@@ -22,6 +27,7 @@
     <div class="pet-name-row">
       <span id="pet-name">sparkiee</span>
       <span id="pet-status" class="pet-status">hanging out</span>
+      <span id="dock-badge" class="dock-badge" hidden>on opencode</span>
       <span id="connection-dot" class="connection-dot" title="Pet host connection"></span>
     </div>
     <div class="caption-box" id="caption-box" aria-live="polite">

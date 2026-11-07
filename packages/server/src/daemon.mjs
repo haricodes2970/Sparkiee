@@ -9,12 +9,12 @@ import { resolveElectronBinary } from '../../core/src/electron-resolver.mjs';
 import { createHostTracker } from '../../core/src/host-tracker.mjs';
 import { listCharacterPacks } from '../../core/src/character-pack.mjs';
 import { createPetController } from '../../core/src/pet-state.mjs';
-import { loadVoiceConfig, resolveVoiceCacheDir, DEFAULT_VOICE_ID, DEFAULT_MODEL_ID, DEFAULT_OUTPUT_FORMAT } from '../../core/src/voice-config.mjs';
+import { loadVoiceConfig, resolveVoiceCacheDir, DEFAULT_VOICES, DEFAULT_SPEED } from '../../core/src/voice-config.mjs';
 import { createAudioCache } from '../../core/src/audio-cache.mjs';
 import { createLocalTts, probeLocalTts } from '../../core/src/local-tts.mjs';
-import { createElevenLabsClient } from '../../core/src/tts-client.mjs';
-import { loadNvidiaConfig, describeNvidiaConfig } from '../../core/src/nvidia-config.mjs';
-import { createNvidiaChatClient } from '../../core/src/chat-client.mjs';
+import { createPiperTts } from '../../core/src/piper-tts.mjs';
+import { loadChatConfig, describeChatConfig, CHAT_PROVIDER_INFO } from '../../core/src/chat-config.mjs';
+import { createChatClient } from '../../core/src/chat-client.mjs';
 import { withoutSecrets } from '../../core/src/env-safety.mjs';
 import { createVoiceService } from './voice-service.mjs';
 import { createAssistantService } from './assistant-service.mjs';
@@ -79,13 +79,37 @@ const getPackDetail = createPackDetailProvider();
 const VOICE_CONFIG_TTL_MS = 3000;
 const DEFAULT_UNCONFIGURED = Object.freeze({
   configured: false,
-  config: { apiKey: null, voiceId: DEFAULT_VOICE_ID, modelId: DEFAULT_MODEL_ID, outputFormat: DEFAULT_OUTPUT_FORMAT },
+  config: { engine: 'piper', voices: { ...DEFAULT_VOICES }, speed: DEFAULT_SPEED },
   warnings: [],
   source: null,
 });
 const petController = createPetController();
+const petDockFile = path.join(paths.home, 'pet-dock.json');
+
+/**
+ * Dock posture is tiny, non-secret state. Persisting it means a runtime
+ * restart puts Sparky back to sleep on the same pinned anchor instead of
+ * resetting to "hanging out" mid-task.
+ */
+async function loadPetDock() {
+  try {
+    const parsed = JSON.parse(await readFile(petDockFile, 'utf8'));
+    if (typeof parsed?.docked === 'boolean') petController.setDocked(parsed.docked);
+  } catch {
+    // Missing or malformed file means "not docked" — never a startup failure.
+  }
+}
+
+async function persistPetDock(docked) {
+  try {
+    await writeFile(petDockFile, `${JSON.stringify({ docked: docked === true })}\n`, { mode: 0o600 });
+  } catch {
+    // Persistence is a convenience; the live daemon state still works.
+  }
+}
 let voiceConfigLoaded = null;
 let voiceConfigAt = 0;
+let piperEngine = null;
 let localTtsStatus = null;
 let localTtsStatusAt = 0;
 const LOCAL_TTS_PROBE_TTL_MS = 30_000;
@@ -119,33 +143,35 @@ function isLocalTtsReady() {
 }
 
 // ---------------------------------------------------------------------------
-// NVIDIA conversational configuration: cached like the voice config so the
-// daemon can answer synchronously. The key never leaves this process.
+// Chat-provider configuration (Groq / Google AI Studio): cached like the voice
+// config so the daemon can answer synchronously. Keys never leave this
+// process and never reach the renderer.
 // ---------------------------------------------------------------------------
-const NVIDIA_CONFIG_TTL_MS = 3000;
-const DEFAULT_NVIDIA_UNCONFIGURED = Object.freeze({
+const CHAT_CONFIG_TTL_MS = 3000;
+const DEFAULT_CHAT_UNCONFIGURED = Object.freeze({
   configured: false,
-  config: { apiKey: null, model: null, baseUrl: null, localOnly: false },
+  provider: 'groq',
+  config: { provider: 'groq', providers: { groq: null, google: null }, localOnly: false },
   warnings: [],
   source: null,
 });
-let nvidiaConfigLoaded = null;
-let nvidiaConfigAt = 0;
+let chatConfigLoaded = null;
+let chatConfigAt = 0;
 
-async function refreshNvidiaConfig({ force = false } = {}) {
+async function refreshChatConfig({ force = false } = {}) {
   const now = Date.now();
-  if (!force && nvidiaConfigLoaded && now - nvidiaConfigAt < NVIDIA_CONFIG_TTL_MS) return nvidiaConfigLoaded;
-  nvidiaConfigAt = now;
+  if (!force && chatConfigLoaded && now - chatConfigAt < CHAT_CONFIG_TTL_MS) return chatConfigLoaded;
+  chatConfigAt = now;
   try {
-    nvidiaConfigLoaded = await loadNvidiaConfig();
+    chatConfigLoaded = await loadChatConfig();
   } catch {
-    nvidiaConfigLoaded = { ...DEFAULT_NVIDIA_UNCONFIGURED, warnings: ['NVIDIA configuration could not be read.'] };
+    chatConfigLoaded = { ...DEFAULT_CHAT_UNCONFIGURED, warnings: ['Chat configuration could not be read.'] };
   }
-  return nvidiaConfigLoaded;
+  return chatConfigLoaded;
 }
 
-function getNvidiaConfig() {
-  return nvidiaConfigLoaded ?? DEFAULT_NVIDIA_UNCONFIGURED;
+function getChatConfig() {
+  return chatConfigLoaded ?? DEFAULT_CHAT_UNCONFIGURED;
 }
 
 /**
@@ -157,44 +183,34 @@ function getNvidiaConfig() {
 function createChatProvider() {
   return {
     configured() {
-      const loaded = getNvidiaConfig();
+      const loaded = getChatConfig();
       return loaded.configured === true && loaded.config.localOnly !== true;
     },
     describe() {
-      const loaded = getNvidiaConfig();
-      return {
-        configured: loaded.configured === true,
-        source: loaded.source,
-        model: loaded.config.model,
-        baseUrl: loaded.config.baseUrl,
-        localOnly: loaded.config.localOnly === true,
-      };
+      return describeChatConfig(getChatConfig());
     },
     chat(messages, options) {
-      return createNvidiaChatClient({ config: getNvidiaConfig().config }).chat(messages, options);
+      const loaded = getChatConfig();
+      const active = loaded.provider;
+      const entry = loaded.config.providers?.[active] ?? {};
+      return createChatClient({
+        provider: active,
+        config: {
+          apiKey: entry.apiKey ?? null,
+          model: entry.model ?? null,
+          baseUrl: CHAT_PROVIDER_INFO[active].baseUrl,
+          localOnly: loaded.config.localOnly === true,
+        },
+      }).chat(messages, options);
     },
   };
 }
 
 /**
- * Test-only provider override: the official API is the default and the
- * only supported provider. The seam is restricted to loopback so the
- * API key can never leave the machine through it.
+ * Local speech availability is probed for real, never assumed from the
+ * presence of a client. The result feeds the honest voice status in the
+ * dashboard and decides whether captions yield to speech.
  */
-function resolveVoiceApiBaseUrl(env) {
-  const value = env.SPARKIEE_VOICE_API_BASE_URL;
-  if (!value) return undefined;
-  try {
-    const url = new URL(value);
-    if (url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')) {
-      return url.origin;
-    }
-  } catch {
-    // fall through to the official API
-  }
-  return undefined;
-}
-
 async function refreshVoiceConfig({ force = false } = {}) {
   const now = Date.now();
   if (!force && voiceConfigLoaded && now - voiceConfigAt < VOICE_CONFIG_TTL_MS) return voiceConfigLoaded;
@@ -207,9 +223,10 @@ async function refreshVoiceConfig({ force = false } = {}) {
       warnings: ['Voice configuration could not be read.'],
     };
   }
-  // Speech is possible with either a cloud key or a working local
-  // synthesiser: the renderer yields chirps to speech in both cases.
-  petController.setVoiceCapability(voiceConfigLoaded.configured === true || isLocalTtsReady());
+  // Speech is possible with a ready Piper runtime or a working espeak-ng
+  // fallback; both are probed rather than guessed.
+  const piperStatus = piperEngine ? await piperEngine.probe().catch(() => null) : null;
+  petController.setVoiceCapability(piperStatus?.status === 'ready' || isLocalTtsReady());
   return voiceConfigLoaded;
 }
 
@@ -397,6 +414,10 @@ async function shutdown(reason) {
       // best effort — shutdown continues
     }
   }
+  if (piperEngine) {
+    await piperEngine.close().catch(() => {});
+    piperEngine = null;
+  }
   if (petHost && !petHost.killed) {
     petHost.kill('SIGTERM');
     const childToKill = petHost;
@@ -417,19 +438,23 @@ async function shutdown(reason) {
 async function main() {
   await ensureRuntimeHome(paths);
   const token = await readAuthToken(paths);
+  await loadPetDock();
   await refreshVoiceConfig({ force: true });
   await refreshLocalTtsStatus({ force: true });
-  await refreshNvidiaConfig({ force: true });
+  await refreshChatConfig({ force: true });
   // Re-evaluate the speech-ready flag now that the local probe has answered.
   petController.setVoiceCapability(getVoiceConfig().configured === true || isLocalTtsReady());
   const voiceCache = createAudioCache({ dir: resolveVoiceCacheDir() });
-  // Local speech fallback: captions are not speech, so an espeak-ng clip is
-  // generated whenever no cloud voice is configured (or the cloud fails).
-  // Availability is probed for real and reported honestly.
+  // Local voice: Piper speaks entirely on this machine. The engine is created
+  // once and keeps a resident worker warm; it reads the current config lazily.
+  piperEngine = createPiperTts({ env: process.env, getConfig: () => getVoiceConfig().config });
+  petController.setVoiceCapability((await piperEngine.probe().catch(() => null))?.status === 'ready' || isLocalTtsReady());
+  // Emergency speech fallback: captions are not speech, so an espeak-ng clip
+  // is generated whenever Piper is unavailable. Probed for real.
   const localTts = isLocalTtsReady() ? createLocalTts() : null;
   const voiceService = createVoiceService({
     getConfig: getVoiceConfig,
-    getClient: (config) => createElevenLabsClient({ config, baseUrl: resolveVoiceApiBaseUrl(process.env) }),
+    getEngine: () => piperEngine,
     cache: voiceCache,
     petController,
     localTts,
@@ -461,6 +486,7 @@ async function main() {
     onWindowEvent: ({ event, pid }) => {
       void log(`Pet host window ${event}${pid ? ` (host pid ${pid})` : ''}.`);
     },
+    onDockChange: (docked) => persistPetDock(docked),
     getCharacterInfo: async () => {
       const { packs } = await describeCharacters();
       return packs.find((pack) => pack.id === 'sparkiee-original') ?? packs[0] ?? null;
@@ -485,7 +511,7 @@ async function main() {
     voiceService,
     assistantService,
     chatProvider: createChatProvider(),
-    refreshChatConfig: () => refreshNvidiaConfig(),
+    refreshChatConfig: () => refreshChatConfig(),
     hotkey,
     refreshVoiceConfig: () => refreshVoiceConfig(),
     isVoiceReady: () => getVoiceConfig().configured === true || isLocalTtsReady(),

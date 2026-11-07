@@ -147,7 +147,7 @@ test('synthesis with real espeak-ng on this machine produces playable wave audio
 });
 
 // ---------------------------------------------------------------------------
-// Voice service: cloud first, then real local speech. A caption alone is not
+// Voice service: Piper first, then real local speech. A caption alone is not
 // "speaking", so an unavailable/failed cloud provider must not be the end of
 // the story — but every outcome is labelled honestly.
 // ---------------------------------------------------------------------------
@@ -155,14 +155,17 @@ test('synthesis with real espeak-ng on this machine produces playable wave audio
 function makeService({ configured = true, synthesizeImpl = null, localTts = null } = {}) {
   const dir = path.join(os.tmpdir(), `sparkiee-vf-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const cache = createAudioCache({ dir });
+  const engine = configured ? {
+    provider: 'piper',
+    probe: async () => ({ engine: 'piper', status: 'ready', installed: true, detail: 'ready' }),
+    synthesize: synthesizeImpl ?? (async () => ({ ok: true, audio: Buffer.from('wav'), mime: 'audio/wav' })),
+  } : null;
   const service = createVoiceService({
     getConfig: () => ({
       configured,
-      config: { apiKey: 'k'.repeat(24), voiceId: 'v', modelId: 'm', outputFormat: 'mp3_44100_128' },
+      config: { engine: 'piper', voices: { hi: 'hi_IN-priyamvada-medium', en: 'en_US-lessac-medium' }, speed: 1 },
     }),
-    getClient: () => (configured ? {
-      synthesize: synthesizeImpl ?? (async () => ({ ok: true, audio: Buffer.from('mp3'), mime: 'audio/mpeg' })),
-    } : null),
+    getEngine: () => engine,
     cache,
     petController: createPetController(),
     localTts,
@@ -181,7 +184,7 @@ function fakeLocalTts(result) {
   };
 }
 
-test('an unconfigured cloud still speaks through the local fallback', async () => {
+test('an unconfigured engine still speaks through the espeak fallback', async () => {
   const wav = waveBuffer({ seconds: 1 });
   const local = fakeLocalTts({ ok: true, audio: wav, mime: 'audio/wav' });
   const { service, dir } = makeService({ configured: false, localTts: local });
@@ -207,7 +210,7 @@ test('an unconfigured cloud still speaks through the local fallback', async () =
   }
 });
 
-test('a cloud outage falls back to local audio and reports the cloud failure', async () => {
+test('a Piper failure falls back to espeak audio and reports the Piper failure', async () => {
   const local = fakeLocalTts({ ok: true, audio: waveBuffer(), mime: 'audio/wav' });
   const { service, dir } = makeService({
     localTts: local,
@@ -217,7 +220,7 @@ test('a cloud outage falls back to local audio and reports the cloud failure', a
     const snapshot = await service.speak('Still speak to me.');
     assert.ok(snapshot.speech.clipId, 'local audio was delivered');
     assert.equal(snapshot.provider, 'espeak-ng');
-    assert.equal(snapshot.fallbackFrom, 'elevenlabs');
+    assert.equal(snapshot.fallbackFrom, 'piper');
     assert.equal(snapshot.fallbackReason, 'quota');
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -242,16 +245,16 @@ test('when every path fails the error is honest, never a fake success', async ()
   }
 });
 
-test('a working cloud provider is preferred and labelled', async () => {
+test('a working Piper engine is preferred and labelled', async () => {
   const local = fakeLocalTts({ ok: true, audio: waveBuffer(), mime: 'audio/wav' });
   const { service, dir } = makeService({ localTts: local });
   try {
     const snapshot = await service.speak('Cloud please.');
-    assert.equal(snapshot.provider, 'elevenlabs');
+    assert.equal(snapshot.provider, 'piper');
     assert.equal(snapshot.fallbackReason, undefined);
-    assert.equal(local.calls.length, 0, 'the local synthesiser is never invoked when the cloud works');
+    assert.equal(local.calls.length, 0, 'espeak is never invoked when Piper works');
     const clip = await service.getClip(snapshot.speech.clipId);
-    assert.equal(clip.mime, 'audio/mpeg');
+    assert.equal(clip.mime, 'audio/wav');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

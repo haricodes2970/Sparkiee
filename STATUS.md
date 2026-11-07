@@ -1,6 +1,6 @@
 # Project Status
 
-Updated: 2026-10-18
+Updated: 2026-11-06
 
 ## Completed
 
@@ -10,7 +10,8 @@ Updated: 2026-10-18
 - [x] Original Sparkiee starter character and Electron pet window.
 - [x] Pet state machine with idle, walk, run, dance, sleep, celebrate, wave,
       surprised, confused, thinking, task_complete, task_error,
-      permission_required, hide, and show commands.
+      permission_required, hide, show, and wake commands; docked posture and
+      a live OpenCode task timer with outcome.
 - [x] **Startup failure diagnosed and fixed**: `require('electron')` blocked the
       daemon event loop with a synchronous binary download, making the CLI time
       out while the daemon was actually healthy. The binary is now resolved
@@ -53,26 +54,33 @@ Updated: 2026-10-18
       rapid commands, hide/show, pid-file edge cases, log token-leak checks,
       manifest validation, path escapes, audio queueing, cooldowns, and
       caption visibility.
-- [x] **Phase 3A spoken voice**: secure ElevenLabs configuration (env/file
-      precedence, 0600 storage, redacted status), official REST client with
-      normalised error codes, sha256-keyed local clip cache with a 25MB LRU
-      cap, predefined original utterance library, daemon-side voice service
-      (async, in-flight dedup, rate-limited tests), voice endpoints with
-      token-only clip delivery, pet-host playback with subtitles synced to
-      the spoken phrase, and honest failure fallbacks (caption plus chirp,
-      never fake success).
-- [x] **Dashboard and CLI voice controls**: provider status panel, speech
-      enable/style controls, debounced test button, and
-      `sparkiee voice status|setup|test|mute|unmute` with hidden key input.
+- [x] **Phase 3A spoken voice**: free local Piper TTS (no account, no key)
+      with a resident Python worker, Hindi + English voice models, 25MB LRU
+      clip cache, predefined original utterance library, daemon-side voice
+      service (async, in-flight dedup, rate-limited tests), token-only clip
+      delivery, playback telemetry, and honest failure fallbacks (caption
+      plus chirp, never fake success). Warm synthesis measured 66–100 ms
+      after a ~1.4 s cold model load.
+- [x] **Dashboard and CLI voice controls**: local provider status panel,
+      speech enable/style controls, debounced test button, and
+      `sparkiee voice status|setup|test|mute|unmute`.
 - [x] **OpenCode observer plugin**: official V2 Plugin API, observer-only,
       reports confirmed execution lifecycle facts (task_complete only on
       execution succeeded, idle never celebrated, permission events never
       auto-approved) to /api/v1/agent/event with per-session dedup and
       cooldowns.
-- [x] 146 automated tests pass (2026-10-18) after Phase 3A, including a
-      full daemon voice lifecycle run against a loopback provider mock:
-      key-leak scans across every endpoint, token-gated clip delivery,
-      cache hits, and caption-preserving failure paths.
+- [x] **OpenCode task collar and docking**: `sparkiee pet dock` pins
+      Sparky on the chatbox and naps her there; a live collar shows the
+      elapsed task timer, start/completion is announced, the celebration
+      returns to sleep, quiet mode keeps the timer without reactions, and
+      the anchor persists per display.
+- [x] **Chat providers**: Groq primary + Google AI Studio secondary behind
+      one provider-aware config; hidden key entry, 0600 storage, provider
+      model verification, and local-only egress blocking. No cloud speech
+      provider remains in the product.
+- [x] 407 automated tests pass (2026-11-06) after the voice, chat, and
+      docking work, including a real-Piper lifecycle test and daemon
+      lifecycle integration runs.
 
 ## Verified on Fedora 44 / GNOME 50.3 Wayland (2026-10-18)
 
@@ -93,11 +101,11 @@ Updated: 2026-10-18
 
 ## Pending
 
-- [ ] One live desktop verification of spoken voice with a real
-      ElevenLabs key: audible playback, subtitle sync, mute behaviour.
-      Mocked tests never count as proof of sound.
-- [ ] Audio persistence decisions: settings currently live in memory; persist
-      across restarts with the Phase 6 settings work.
+- [ ] One human listening pass on the live desktop: Piper playback,
+      subtitle sync, mute, and a docked OpenCode task start/completion.
+      Generated WAVs and timing measurements never count as proof of sound.
+- [ ] Audio persistence decisions: settings currently live in memory; dock
+      posture and the screen anchor persist, other settings do not yet.
 - [ ] Second character pack to prove the format end-to-end.
 - [ ] Phase 3B groundwork: local wake word and speech input with explicit
       microphone permission and indicators; no continuous cloud streaming.
@@ -111,14 +119,15 @@ Updated: 2026-10-18
 - Activity history is dashboard-session-local and not persisted.
 - User-local character packs are validated but not sandboxed beyond path
   checks; only install packs you trust.
-- Spoken voice needs an ElevenLabs account and key; without one the pet
-  behaves exactly as before (chirps + captions). Audible playback of the
-  speech pipeline has not yet been verified live with a real key.
+- Spoken voice is fully local (Piper + espeak-ng fallback); the first
+  phrase after a cold start takes ~1.5 s while the model loads, then
+  ~0.1 s. No cloud account is required.
 
 ## Next
 
-1. Live desktop verification of spoken voice with a real ElevenLabs key.
-2. Phase 3B groundwork: local wake word and speech input (explicit mic
-   permission, indicators, no continuous cloud streaming).
-3. Settings persistence across restarts (Phase 6 groundwork).
+1. Human listening pass: Piper playback, synced captions, mute, and a
+   docked OpenCode task start/completion.
+2. Wake word and speech input (explicit mic permission, indicators, no
+   continuous cloud streaming).
+3. Settings persistence across restarts (beyond dock anchor/posture).
 4. Second character pack to exercise the picker and clip-style voices.

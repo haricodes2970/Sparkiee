@@ -311,6 +311,44 @@ test('character endpoints expose pack metadata without file paths', async () => 
   }
 });
 
+test('dock posture is same-origin, validated, and persisted through the callback', async () => {
+  const changes = [];
+  const instance = await startServer({ onDockChange: (docked) => changes.push(docked) });
+  try {
+    const base = `http://127.0.0.1:${instance.port}`;
+    const dock = await fetch(`${base}/api/v1/pet/dock`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: base },
+      body: JSON.stringify({ docked: true }),
+    });
+    assert.equal(dock.status, 200);
+    const docked = await dock.json();
+    assert.equal(docked.pet.docked, true);
+    assert.equal(docked.pet.animation, 'sleep');
+    assert.equal(docked.pet.visible, true, 'docking never hides the pet');
+
+    const state = await (await fetch(`${base}/api/v1/pet/state`)).json();
+    assert.equal(state.docked, true, 'the shared state carries the posture');
+
+    const bad = await fetch(`${base}/api/v1/pet/dock`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: base },
+      body: JSON.stringify({ docked: 'yes' }),
+    });
+    assert.equal(bad.status, 400);
+
+    const undock = await fetch(`${base}/api/v1/pet/dock`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: base },
+      body: JSON.stringify({ docked: false }),
+    });
+    assert.equal((await undock.json()).pet.docked, false);
+    assert.deepEqual(changes, [true, false], 'persistence sees each real change');
+  } finally {
+    await close(instance.server);
+  }
+});
+
 test('reaction commands flow through the pet command endpoint', async () => {
   const instance = await startServer();
   try {

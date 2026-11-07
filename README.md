@@ -15,13 +15,13 @@ Sparkiee is a local-first desktop companion app with a character-agnostic design
   animations (13 states), original synthesized voice reactions with a
   priority queue, subtitles beneath the pet, and dashboard audio/caption
   controls.
-- Phase 3A — spoken voice and OpenCode reactions: implemented — optional
-  ElevenLabs speech layered over the original chirps, subtitles synced to
-  the spoken phrase, dashboard and CLI voice controls, and an
-  observer-only OpenCode plugin that celebrates confirmed task
-  completions. Automated tests include a full daemon lifecycle run
-  against a loopback provider mock; audible playback on a live desktop
-  with a real API key is the remaining verification step.
+- Phase 3A — spoken voice and OpenCode reactions: implemented — free,
+  local Piper speech layered over the original chirps, subtitles synced to
+  the spoken phrase, dashboard and CLI voice controls, an observer-only
+  OpenCode plugin that tracks confirmed task start/completion, and a
+  dockable pet that naps on the OpenCode chatbox. Audible playback on the
+  live desktop is verified by generation and timing, not by a microphone
+  measurement; see the honest status in `docs/PHASE_3_VOICE.md`.
 
 See [STATUS.md](STATUS.md), [ARCHITECTURE.md](ARCHITECTURE.md),
 [Phase 2 notes](docs/PHASE_2_DESKTOP_PET.md), and
@@ -44,20 +44,30 @@ interrupt quieter ones, and a dashboard mute that keeps subtitles working.
 Captions render beneath the character with adjustable duration and a
 larger-text accessibility option.
 
-Optionally, Sparky can speak real words with an
-[ElevenLabs](https://elevenlabs.io) voice while keeping the chirps as the
-fallback identity. Speech is off until you configure a key; predefined
-short lines only ever reach the provider (never your files, terminal, or
-agent content), clips are cached locally, and the subtitle under the pet
-tracks the spoken phrase even while muted. Setup, policies, and
-troubleshooting live in [docs/PHASE_3_VOICE.md](docs/PHASE_3_VOICE.md):
+Optionally, Sparky can speak real words with a free local
+[Piper](https://github.com/rhasspy/piper) voice while keeping the chirps as
+the fallback identity. The engine, models, and every phrase stay on this
+machine; only predefined short lines are spoken (never your files,
+terminal, or agent content), clips are cached locally, and the subtitle
+under the pet tracks the spoken phrase even while muted. Setup, policies,
+and troubleshooting live in [docs/PHASE_3_VOICE.md](docs/PHASE_3_VOICE.md):
 
 ~~~bash
-sparkiee voice setup     # stores the key with 0600 permissions, never echoes it
-sparkiee voice status    # configuration and live daemon view
+sparkiee voice setup     # creates the venv and downloads both voices once
+sparkiee voice status
 sparkiee voice test      # speaks one test phrase on the desktop pet
 sparkiee voice mute      # mute all sound; captions keep working
 sparkiee voice unmute
+~~~
+
+The chat assistant uses Groq or Google AI Studio (one key, entered through
+a hidden prompt and stored owner-only). Music commands are parsed locally.
+To have Sparky nap on the OpenCode prompt and track task start/completion:
+
+~~~bash
+sparkiee assistant setup --provider groq   # or --provider google
+sparkiee pet dock                          # drag the sleeping pet to refine
+sparkiee pet status
 ~~~
 
 To add your own pack, create `~/.local/share/sparkiee/characters/<id>/`
@@ -92,6 +102,8 @@ sparkiee start
 sparkiee status
 sparkiee stop
 sparkiee voice status | setup | test | mute | unmute
+sparkiee assistant setup --provider groq|google | status | stt-setup
+sparkiee pet dock | undock | sleep | wake | status
 sparkiee --help
 sparkiee --version
 ~~~
@@ -106,9 +118,11 @@ The Electron dependency downloads a platform-specific desktop runtime during npm
 - SPARKIEE_START_TIMEOUT_MS: CLI startup wait budget (default 15000).
 - SPARKIEE_ELECTRON_DIR: diagnostic seam pointing at an electron package directory (used by tests to simulate a missing binary).
 - SPARKIEE_OZONE_PLATFORM=wayland: opt out of the default XWayland selection to test another backend; global positioning and always-on-top behaviour are not promised on native Wayland.
-- ELEVENLABS_API_KEY: optional spoken-voice key; takes precedence over the stored voice setup and never reaches the browser.
-- SPARKIEE_VOICE_ID / SPARKIEE_VOICE_MODEL: override the default voice id and model.
-- SPARKIEE_VOICE_API_BASE_URL: test-only provider seam; accepts loopback http URLs exclusively so the key cannot be redirected off the machine.
+- SPARKIEE_TTS_SPEED: local Piper speaking speed (0.5–2.0, default 1.0).
+- GROQ_API_KEY: optional Groq chat key; overrides `assistant setup` storage.
+- GOOGLE_AI_API_KEY: optional Google AI Studio chat key (alias `GEMINI_API_KEY`).
+- SPARKIEE_CHAT_LOCAL_ONLY=1: block all outbound chat requests.
+- SPARKIEE_MUSIC_ROOTS: colon-separated music directories to scan (default `~/Music`).
 
 ## Security principles
 
@@ -118,21 +132,22 @@ The Electron dependency downloads a platform-specific desktop runtime during npm
 - Same-origin check and strict payload validation for dashboard pet commands.
 - No arbitrary shell command endpoint, remote analytics, or cloud requirement.
 - No automated approval of coding-agent permissions.
-- The ElevenLabs key lives only in the daemon: stored with 0600
-  permissions under the user config directory (or the environment), stripped from the pet-host child
-  environment, never rendered into the browser, dashboard, logs, or API
-  responses; voice responses are additionally scanned for key substrings in
-  tests.
+- Chat keys (Groq / Google AI Studio) live only in the daemon: stored
+  with 0600 permissions under the user config directory (or the
+  environment), stripped from the pet-host child environment, and never
+  rendered into the browser, dashboard, logs, or API responses. Voice
+  needs no key at all — Piper runs locally.
 - Spoken lines are predefined and short; agent events carry only session
   ids and event names — message content, file paths, and terminal output
-  never reach the speech provider.
+  never reach any speech provider.
 
 ## Roadmap
 
-1. One live desktop verification of spoken voice with a real ElevenLabs
-   key (audible playback, captions, mute behaviour) — mocks never count.
-2. Phase 3B groundwork: local wake word and speech input with explicit
-   microphone permission and indicators, no continuous cloud streaming.
+1. One human listening pass on a live desktop: Piper playback, synced
+   captions, mute, and a docked OpenCode task start/completion — generated
+   files alone never count as proof of sound.
+2. Wake word and speech input with explicit microphone permission and
+   indicators, no continuous cloud streaming.
 3. Improve dragging, emotes, idle reactions, and accessibility.
 4. Add native desktop notifications alongside the existing voice reactions.
 5. Add a second character pack to exercise the picker and clip-style voices.

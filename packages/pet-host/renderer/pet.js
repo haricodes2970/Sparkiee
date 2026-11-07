@@ -12,6 +12,10 @@ const captionText = document.querySelector('#caption-text');
 const connectionDot = document.querySelector('#connection-dot');
 const errorText = document.querySelector('#pet-error');
 const petButton = document.querySelector('#pet-button');
+const taskCollar = document.querySelector('#task-collar');
+const taskCollarLabel = document.querySelector('#task-collar-label');
+const taskCollarTime = document.querySelector('#task-collar-time');
+const dockBadge = document.querySelector('#dock-badge');
 let currentState = null;
 let currentPack = null;
 let pointerStart = null;
@@ -255,12 +259,53 @@ async function handleSpeech(speech) {
 // State application
 // ---------------------------------------------------------------------------
 
+function formatElapsed(ms) {
+  const totalSeconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+/**
+ * The task collar is driven entirely by the daemon's confirmed task record:
+ * a live timer while `active`, then the measured duration and outcome. It
+ * never invents a task from an animation or a caption.
+ */
+function paintTaskCollar(state) {
+  if (!taskCollar) return;
+  const task = state?.task;
+  if (!task || typeof task !== 'object') {
+    taskCollar.hidden = true;
+    delete taskCollar.dataset.outcome;
+    return;
+  }
+  taskCollar.hidden = false;
+  const active = task.active === true;
+  if (active) {
+    delete taskCollar.dataset.outcome;
+    taskCollarLabel.textContent = 'Working';
+    const startedAt = Date.parse(task.startedAt ?? '');
+    taskCollarTime.textContent = Number.isFinite(startedAt) ? formatElapsed(Date.now() - startedAt) : '0:00';
+    return;
+  }
+  const failed = task.outcome === 'error';
+  const idle = task.outcome === 'idle';
+  taskCollar.dataset.outcome = failed ? 'error' : idle ? 'idle' : 'success';
+  taskCollarLabel.textContent = failed ? 'Snag' : idle ? 'Idle' : 'Done';
+  taskCollarTime.textContent = formatElapsed(task.durationMs ?? 0);
+}
+
 function applyState(state) {
   if (!state || typeof state !== 'object') return;
   currentState = state;
   statusText.textContent = String(state.label || 'Hanging out').toLowerCase().slice(0, 40);
   connectionDot.classList.toggle('disconnected', state.hostConnected !== true);
   document.querySelector('#pet-name').textContent = String(state.characterName || 'sparkiee').slice(0, 32).toLowerCase();
+  if (dockBadge) dockBadge.hidden = state.docked !== true;
+  root.dataset.docked = state.docked === true ? 'true' : 'false';
+  paintTaskCollar(state);
   if (state.visible === false) {
     root.dataset.hidden = 'true';
     // Hidden pet must not keep talking: stop any clip mid-phrase.
@@ -443,6 +488,10 @@ sendDashboardButton.addEventListener('click', async (event) => {
 
 window.sparkieePet.onState(applyState);
 window.sparkieePet.getState().then(applyState).catch(() => {});
+// The task timer is the only thing that changes between state pushes.
+window.setInterval(() => {
+  if (currentState?.task?.active === true) paintTaskCollar(currentState);
+}, 1000);
 window.sparkieePet.onSpeech((speech) => {
   // Ignore superseded or duplicate announcements (state re-sends, restarts).
   if (!speech || !Number.isInteger(speech.id) || speech.id <= lastSpeechId) return;

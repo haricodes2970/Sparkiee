@@ -21,6 +21,12 @@ const retryHostButton = document.querySelector('#retry-host');
 const speedSlider = document.querySelector('#move-speed');
 const speedValue = document.querySelector('#move-speed-value');
 const autoRoamToggle = document.querySelector('#auto-roam');
+const quietModeToggle = document.querySelector('#quiet-mode');
+const overviewTaskState = document.querySelector('#overview-task-state');
+const dockStateText = document.querySelector('#dock-state-text');
+const dockPetButton = document.querySelector('#dock-pet');
+const undockPetButton = document.querySelector('#undock-pet');
+const wakePetButton = document.querySelector('#wake-pet');
 const audioEnabledToggle = document.querySelector('#audio-enabled');
 const audioVolumeSlider = document.querySelector('#audio-volume');
 const audioVolumeValue = document.querySelector('#audio-volume-value');
@@ -120,14 +126,15 @@ let presentationInFlight = false;
 let captionHideTimer = null;
 
 const SPEECH_ERROR_TEXT = {
-  not_configured: 'No API key yet — run “sparkiee voice setup”. Original chirps are in use meanwhile.',
-  auth: 'ElevenLabs rejected the API key. Run “sparkiee voice setup” again.',
-  quota: 'The ElevenLabs account is out of credits or restricted for this voice.',
-  rate: 'ElevenLabs rate limit reached — give it a few seconds.',
-  validation: 'ElevenLabs rejected the request (voice, model, or text).',
-  timeout: 'Speech generation timed out — the provider was too slow.',
-  network: 'Could not reach ElevenLabs — check the connection.',
-  provider: 'ElevenLabs returned something unexpected.',
+  not_configured: 'The local voice is not set up — run “sparkiee voice setup”. Original chirps are in use meanwhile.',
+  not_installed: 'Piper is not installed — run “sparkiee voice setup”.',
+  setup_required: 'Piper is not installed — run “sparkiee voice setup”.',
+  voice_missing: 'A voice model is missing — run “sparkiee voice setup”.',
+  validation: 'The local voice rejected that phrase.',
+  timeout: 'The local voice took too long to answer.',
+  network: 'The local voice could not run.',
+  failed: 'The local voice failed while synthesising that phrase.',
+  provider: 'The local voice returned something unexpected.',
 };
 
 function speechErrorText(code) {
@@ -481,6 +488,27 @@ settingsRestoreButton.addEventListener('click', async () => {
   }
 });
 
+function formatTaskTime(ms) {
+  const totalSeconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function describeTask(task) {
+  if (!task || typeof task !== 'object') return 'No task tracked yet';
+  if (task.active === true) {
+    const startedAt = Date.parse(task.startedAt ?? '');
+    return `OpenCode task running — ${Number.isFinite(startedAt) ? formatTaskTime(Date.now() - startedAt) : '0:00'}`;
+  }
+  if (task.outcome === 'success') return `Last task completed in ${formatTaskTime(task.durationMs)}`;
+  if (task.outcome === 'error') return 'Last task failed — check OpenCode';
+  if (task.outcome === 'idle') return 'Last task went idle without a confirmed result';
+  return 'No task tracked yet';
+}
+
 function applyPetState(state) {
   if (!state || typeof state !== 'object') return;
   lastPetState = state;
@@ -501,6 +529,15 @@ function applyPetState(state) {
   if (state.settings && document.activeElement !== autoRoamToggle) {
     autoRoamToggle.checked = state.settings.autoRoam !== false;
   }
+  if (state.settings && document.activeElement !== quietModeToggle && quietModeToggle) {
+    quietModeToggle.checked = state.settings.quiet === true;
+  }
+  const docked = state.docked === true;
+  if (dockStateText) dockStateText.textContent = docked ? 'Dock: OpenCode chatbox' : 'Dock: desktop';
+  if (dockPetButton) dockPetButton.disabled = docked;
+  if (undockPetButton) undockPetButton.disabled = !docked;
+  if (wakePetButton) wakePetButton.disabled = !docked;
+  if (overviewTaskState) overviewTaskState.textContent = describeTask(state.task);
   if (state.settings?.audio) {
     if (document.activeElement !== audioEnabledToggle) audioEnabledToggle.checked = state.settings.audio.enabled !== false;
     if (document.activeElement !== audioVolumeSlider) audioVolumeSlider.value = String(state.settings.audio.volume ?? 0.7);
@@ -646,6 +683,43 @@ autoRoamToggle.addEventListener('change', () => {
   const enabled = autoRoamToggle.checked;
   void sendSettings({ autoRoam: enabled }, enabled ? 'Auto-roam enabled.' : 'Auto-roam disabled.');
 });
+if (quietModeToggle) {
+  quietModeToggle.addEventListener('change', () => {
+    const enabled = quietModeToggle.checked;
+    void sendSettings({ quiet: enabled }, enabled
+      ? 'Quiet mode on — the task timer still runs, reactions stay silent.'
+      : 'Quiet mode off — agent events animate and speak again.');
+  });
+}
+
+async function setDock(docked) {
+  if (dockPetButton) dockPetButton.disabled = true;
+  if (undockPetButton) undockPetButton.disabled = true;
+  commandFeedback.className = 'command-feedback';
+  commandFeedback.textContent = docked ? 'Docking Sparky on the OpenCode chatbox…' : 'Returning Sparky to the desktop…';
+  try {
+    const response = await fetch('/api/v1/pet/dock', {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/json' },
+      body: JSON.stringify({ docked }),
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    applyPetState(result.pet);
+    commandFeedback.className = 'command-feedback success';
+    commandFeedback.textContent = docked
+      ? 'Sparky is napping on the chatbox — drag the sleeping pet to fine-tune the spot.'
+      : 'Sparky is back on the desktop.';
+    recordActivity(docked ? 'dock' : 'undock', result.pet.label, result.pet.message, result.pet.updatedAt);
+  } catch (error) {
+    commandFeedback.className = 'command-feedback error';
+    commandFeedback.textContent = error.message || 'Could not change the dock state.';
+  }
+}
+dockPetButton?.addEventListener('click', () => void setDock(true));
+undockPetButton?.addEventListener('click', () => void setDock(false));
+wakePetButton?.addEventListener('click', () => void sendPetCommand('wake'));
 
 audioEnabledToggle.addEventListener('change', () => {
   const enabled = audioEnabledToggle.checked;
@@ -704,8 +778,8 @@ captionsLargeToggle.addEventListener('change', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Spoken voice (ElevenLabs): provider status, style controls, and an honest
-// test action. This browser never sees the API key — it only reads the
+// Spoken voice (local Piper): engine status, style controls, and an honest
+// test action. Everything runs on this machine; this browser only reads the
 // daemon's sanitized status and asks the daemon to speak.
 // ---------------------------------------------------------------------------
 
@@ -734,16 +808,17 @@ async function refreshVoiceStatus() {
     const voice = payload.voice ?? {};
     if (voice.configured) {
       voiceProviderDot.classList.add('voice-provider-ready');
-      voiceProviderText.textContent = `ElevenLabs ready · ${voice.voiceId === 'k7uh1RfFIE9Dn75CNvuX' ? 'Sparky default voice' : voice.voiceId} · ${voice.modelId} · ${voice.cacheFiles ?? 0} clips cached`;
-      voiceStat.textContent = 'ElevenLabs ready';
-      voiceStatCaption.textContent = `${voice.voiceId === 'k7uh1RfFIE9Dn75CNvuX' ? 'Sparky default voice' : voice.voiceId} · ${voice.modelId}`;
-      overviewVoiceState.textContent = `ElevenLabs ready · ${voice.cacheFiles ?? 0} clips cached`;
+      const voiceLabel = voice.voices?.hi ? 'Hindi + English' : 'local';
+      voiceProviderText.textContent = `Piper ready · ${voiceLabel} · ${voice.cacheFiles ?? 0} clips cached`;
+      voiceStat.textContent = 'Piper ready';
+      voiceStatCaption.textContent = `${voiceLabel} · local, free`;
+      overviewVoiceState.textContent = `Piper ready · ${voice.cacheFiles ?? 0} clips cached`;
     } else {
       voiceProviderDot.classList.remove('voice-provider-ready');
-      voiceProviderText.textContent = 'Not configured — original chirps in use. Run “sparkiee voice setup”.';
+      voiceProviderText.textContent = 'Piper not installed — original chirps in use. Run “sparkiee voice setup”.';
       voiceStat.textContent = 'Original chirps';
-      voiceStatCaption.textContent = 'No ElevenLabs key — run “sparkiee voice setup”';
-      overviewVoiceState.textContent = 'Not configured — original chirps in use.';
+      voiceStatCaption.textContent = 'No local voice — run “sparkiee voice setup”';
+      overviewVoiceState.textContent = 'Piper not installed — original chirps in use.';
     }
     if (voice.lastError) {
       voiceProviderDot.classList.remove('voice-provider-ready');
@@ -755,8 +830,8 @@ async function refreshVoiceStatus() {
     } else {
       voiceProviderDot.classList.remove('voice-provider-error');
     }
-    // Local fallback is a separate readiness fact: a caption is not speech, and
-    // "no cloud key" must not read as "Sparky cannot talk".
+    // The espeak fallback is a separate readiness fact: a caption is not speech,
+    // and "Piper missing" must not read as "Sparky cannot talk".
     const localReady = voice.localFallback?.available === true;
     const localName = voice.localFallback?.binary || 'espeak-ng';
     if (!voice.configured && localReady) {
@@ -977,7 +1052,7 @@ testVoiceButton.addEventListener('click', async () => {
   voiceTestInFlight = true;
   testVoiceButton.disabled = true;
   voiceFeedback.dataset.locked = 'true';
-  voiceFeedback.textContent = 'Asking ElevenLabs for a test phrase…';
+  voiceFeedback.textContent = 'Asking the local voice for a test phrase…';
   try {
     const response = await fetch('/api/v1/voice/test', {
       method: 'POST',

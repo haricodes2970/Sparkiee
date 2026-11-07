@@ -10,8 +10,8 @@
  * Pure Node: no dependencies, no I/O.
  */
 
-/** Long opaque tokens: NVIDIA (nvapi-...), ElevenLabs (sk_...), generic. */
-const TOKEN_SHAPED = /\b(?:nvapi-|sk_)[A-Za-z0-9_-]{8,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2}\b/g;
+/** Long opaque tokens: provider API keys (gsk_/sk_/AIza) and generic. */
+const TOKEN_SHAPED = /\b(?:gsk_|sk_|sk-|AIza)[A-Za-z0-9_-]{8,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2}\b/g;
 /** `Bearer <token>` / `Authorization: ApiKey <token>` headers. */
 const AUTH_HEADER = /\b(Bearer|ApiKey|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/gi;
 /** `api_key=...`, `"apiKey": "..."`, `token: ...`, `secret = ...`. */
