@@ -60,9 +60,25 @@ export function normalizeConversationText(text) {
     .trim();
 }
 
+const CLOSING_PREFIXES = Object.freeze([
+  'thats all', 'that is all', 'thats it', 'that is it',
+  'we are done', 'were done', 'i am done', 'im done',
+  'nothing else', 'no thanks', 'no thank you',
+]);
+
+const POLITE_TAIL_WORDS = new Set(['ok', 'okay', 'please', 'thanks', 'thank', 'you', 'buddy']);
+
 export function isClosingPhrase(text) {
   const normalized = normalizeConversationText(text);
-  return normalized.length > 0 && CLOSING_PHRASES.has(normalized);
+  if (normalized.length === 0) return false;
+  if (CLOSING_PHRASES.has(normalized)) return true;
+  // "That's all, thank you" should close just like the bare phrase.
+  for (const prefix of CLOSING_PREFIXES) {
+    if (!normalized.startsWith(`${prefix} `)) continue;
+    const tail = normalized.slice(prefix.length + 1).split(' ').filter(Boolean);
+    if (tail.every((word) => POLITE_TAIL_WORDS.has(word))) return true;
+  }
+  return false;
 }
 
 /**

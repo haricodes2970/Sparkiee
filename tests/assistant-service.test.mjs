@@ -168,6 +168,10 @@ function fakeMicWithAudio() {
     },
     dispose: () => { active = null; },
     _feed: (chunk) => mgr._latestOnAudio?.(chunk),
+    _expire: (summary) => {
+      active = null;
+      for (const w of doneWaiters.splice(0)) w(summary);
+    },
     // helper for tests: capture the onAudio callback handed at start
   };
   // Wrap start to remember onAudio.
@@ -378,4 +382,41 @@ test('assistant pipeline: recogniser not installed → honest setup reply, not s
   assert.equal(result.transcript, null);
   assert.equal(result.error, true);
   assert.match(result.reply, /not set up yet|setup/i);
+});
+
+test('assistant pipeline: a finished turn notifies the conversation handler exactly once', async () => {
+  const mic = fakeMicWithAudio();
+  const turns = [];
+  const svc = createAssistantService({
+    micSessionManager: mic,
+    stt: sttStub(STT_OK),
+    runIntent: runIntentStub(RUN_OK),
+  });
+  svc.setTurnHandler((out, meta) => { turns.push({ out, meta }); });
+  const { done } = await svc.startPtt();
+  mic._feed(loudChunk());
+  await svc.stopPtt();
+  await done;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].out.transcript, 'play madira');
+  assert.equal(turns[0].meta.reason, 'ptt-stopped');
+});
+
+test('assistant pipeline: a silent max-duration turn notifies with no fake transcript', async () => {
+  const mic = fakeMicWithAudio();
+  const turns = [];
+  const svc = createAssistantService({
+    micSessionManager: mic,
+    stt: sttStub(STT_OK),
+    runIntent: runIntentStub(RUN_OK),
+  });
+  svc.setTurnHandler((out, meta) => { turns.push({ out, meta }); });
+  await svc.startPtt();
+  mic._expire({ id: 'mic-audio', durationMs: 8000, bytes: 0, peakRms: 0, avgRms: 0, reason: 'max-duration', error: null });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].out.transcript, null);
+  assert.equal(turns[0].meta.reason, 'ptt-max-duration');
 });

@@ -35,6 +35,20 @@ export function createAssistantService({
   // Transcript pipeline (capture buffer stays in RAM only).
   let executor = null; // attached by the server: {transcribe, cancelTranscribe, runText}
   let capture = null; // {buffer, watchdogId, speechSeen, lastLoudAt, silenceMs, settled, result}
+  let turnHandler = null; // optional async (out, {reason}) => void
+
+  /**
+   * Tell the server a turn is complete so it can decide whether to reopen the
+   * microphone. Notifications are asynchronous and best-effort: a conversation
+   * policy failure must never corrupt the PTT result or the state machine.
+   */
+  function notifyTurn(out, meta) {
+    const handler = turnHandler;
+    if (!handler) return;
+    Promise.resolve()
+      .then(() => handler(out, meta))
+      .catch(() => {});
+  }
   function rmsOf(chunk) {
     if (!chunk || chunk.length < 2) return 0;
     let sum = 0;
@@ -301,6 +315,13 @@ export function createAssistantService({
         ...diagnostics,
         note: 'Recording timed out before any speech was detected. Nothing was transcribed.',
       });
+      if (!utterance.turnNotified) {
+        utterance.turnNotified = true;
+        notifyTurn({
+          capture: summary, transcript: null, handled: false, executed: false,
+          intent: null, reply: null, speech: null, error: false,
+        }, { reason: 'ptt-max-duration' });
+      }
     }).catch(() => {});
     if (controller.snapshot().state === 'listening') {
       // Stale listening state — previous session just expired between checks.
@@ -348,6 +369,10 @@ export function createAssistantService({
       const waiters = utterance.resultWaiters ?? [];
       utterance.resultWaiters = [];
       for (const w of waiters) w(out);
+      if (!utterance.turnNotified) {
+        utterance.turnNotified = true;
+        notifyTurn(out, { reason });
+      }
       return out;
     };
     try { controller.transition('transcribing', { reason }); } catch {
@@ -469,6 +494,7 @@ export function createAssistantService({
       intent: out?.intent ?? null,
       reply: out?.reply ?? null,
       speech,
+      conversationDone: out?.conversationDone === true,
       error: false,
     });
   }
@@ -604,6 +630,11 @@ export function createAssistantService({
     };
   }
 
+  function setTurnHandler(handler) {
+    turnHandler = typeof handler === 'function' ? handler : null;
+    return turnHandler;
+  }
+
   function recordAction(action) {
     controller.recordAction(action);
   }
@@ -622,6 +653,7 @@ export function createAssistantService({
     cancelPtt,
     attachExecutor,
     runDiagnostic,
+    setTurnHandler,
     recordAction,
     dispose,
     getWakeSetup,

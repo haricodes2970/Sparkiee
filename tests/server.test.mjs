@@ -971,6 +971,8 @@ function assistantEndpointStub() {
   let micActive = false;
   const serviceStub = {
     lastAction: null,
+    startCalls: 0,
+    turnHandler: null,
     status: () => ({
       state,
       since: new Date().toISOString(),
@@ -989,11 +991,13 @@ function assistantEndpointStub() {
     },
     startPtt: async () => {
       if (micActive) throw Object.assign(new Error('MIC_BUSY'), { code: 'MIC_BUSY' });
+      serviceStub.startCalls += 1;
       micActive = true;
       listeningEnabled = true;
       state = 'listening';
       return { sessionId: 'ptt-1', done: Promise.resolve({ id: 'ptt-1', durationMs: 500, bytes: 16000, peakRms: 800, avgRms: 400, reason: 'manual', error: null }) };
     },
+    setTurnHandler: (handler) => { serviceStub.turnHandler = handler; },
     stopPtt: async () => {
       micActive = false;
       listeningEnabled = false;
@@ -1320,5 +1324,95 @@ test('assistant ptt/toggle decides server-side: start when idle, stop while list
 
     const unauth = await fetch(`${base}/api/v1/assistant/ptt/toggle`, { method: 'POST', body: '{}' });
     assert.equal(unauth.status, 403);
+  } finally { await close(instance.server); }
+});
+
+test('closing phrases end the voice session locally without spending a chat turn', async () => {
+  let chatCalls = 0;
+  const instance = await startServer({
+    musicService: assistantServiceStub(),
+    assistantThrottleMs: 0,
+    chatProvider: {
+      configured: () => true,
+      describe: () => ({ provider: 'test', label: 'Test', model: 'test' }),
+      chat: async () => { chatCalls += 1; return { ok: true, text: 'should not happen' }; },
+    },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` },
+      body: JSON.stringify({ text: "That's all, thank you." }),
+    });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.intent, 'conversation_end');
+    assert.equal(body.conversationDone, true);
+    assert.equal(body.executed, false);
+    assert.match(body.reply, /here|okay/i);
+    assert.equal(chatCalls, 0, 'closing phrase never reaches the model');
+  } finally { await close(instance.server); }
+});
+
+test('the first summon uses the full greeting and later summons stay brief', async () => {
+  const spoken = [];
+  const instance = await startServer({
+    assistantService: assistantEndpointStub(),
+    voiceService: {
+      speak: async (text) => { spoken.push(text); return { speech: { id: 'greet', text, clipId: null } }; },
+      waitForPlayback: async () => {},
+    },
+    isVoiceReady: () => true,
+  });
+  try {
+    const call = (path) => fetch(`http://127.0.0.1:${instance.port}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` },
+      body: '{}',
+    });
+    assert.equal((await call('/api/v1/assistant/ptt/start')).status, 200);
+    assert.equal((await call('/api/v1/assistant/ptt/stop')).status, 200);
+    assert.equal((await call('/api/v1/assistant/ptt/start')).status, 200);
+    assert.equal(spoken.length, 2);
+    assert.match(spoken[0], /Sparky/);
+    assert.doesNotMatch(spoken[1], /Sparky/);
+    assert.ok(spoken[1].length < spoken[0].length);
+  } finally { await close(instance.server); }
+});
+
+test('a spoken turn waits for the reply, then reopens the mic without a greeting', async () => {
+  const assistantService = assistantEndpointStub();
+  const timers = [];
+  const instance = await startServer({
+    assistantService,
+    setTimeoutImpl: (fn, ms) => { const timer = { fn, ms, cancelled: false }; timers.push(timer); return timer; },
+    clearTimeoutImpl: (timer) => { if (timer) timer.cancelled = true; },
+    followUpGraceMs: 250,
+    followUpDelayMs: 100,
+  });
+  try {
+    const start = await fetch(`http://127.0.0.1:${instance.port}/api/v1/assistant/ptt/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${instance.token}` },
+      body: '{}',
+    });
+    assert.equal(start.status, 200);
+    assert.equal(assistantService.startCalls, 1);
+    await assistantService.stopPtt(); // leave the fake mic, keep the conversation active
+
+    const turn = assistantService.turnHandler({
+      transcript: 'open project DJ', handled: true, executed: true,
+      intent: 'project_open', reply: 'Opening DJ.', speech: null,
+    }, { reason: 'ptt-stopped' });
+    await new Promise((resolve) => setImmediate(resolve));
+    const grace = timers.find((timer) => timer.ms === 250 && !timer.cancelled);
+    assert.ok(grace, 'reply grace timer scheduled');
+    grace.fn();
+    await turn;
+    const followUp = timers.find((timer) => timer.ms === 100 && !timer.cancelled);
+    assert.ok(followUp, 'follow-up timer scheduled');
+    followUp.fn();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(assistantService.startCalls, 2, 'mic reopened for a second turn');
   } finally { await close(instance.server); }
 });

@@ -10,6 +10,7 @@ import { createPetController, isValidDockPayload, isValidPetCommandPayload, isVa
 import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
 import { parseMusicIntent, runMusicCommand } from '../../core/src/music-commands.mjs';
+import { conversationDecision, isClosingPhrase, nextGreeting, FOLLOW_UP_MS } from '../../core/src/conversation.mjs';
 import { CHAT_ERROR_MESSAGES } from '../../core/src/chat-client.mjs';
 import { createGnomeHotkeyInstaller } from '../../core/src/gnome-hotkey.mjs';
 import { createSttService, probeSttSetup, resolveSttModel } from '../../core/src/stt-service.mjs';
@@ -159,12 +160,114 @@ export function createSparkieeServer({
   onWindowEvent = null, // ({event, pid}) => void — diagnostics sink
   onDockChange = null, // (docked) => void — persist the docked posture
   gnomeKeybindingProbe = null, // testable override of the live gsettings probe
+  followUpDelayMs = 100,
+  followUpListenMs = FOLLOW_UP_MS,
+  followUpGraceMs = 250,
+  setTimeoutImpl = (fn, ms) => setTimeout(fn, ms),
+  clearTimeoutImpl = (id) => clearTimeout(id),
 }) {
   let shutdownRequested = false;
   const commandSpeechSpokeAt = new Map(); // voiceEvent -> timestamp
   const agentEventSeen = new Map(); // `${sessionId}:${event}` -> timestamp
   let lastAssistantCommandAt = 0;
   const assistantSpeechTimes = []; // rolling window for TTS rate limiting
+
+  // Spoken conversation state. `active` covers the whole multi-turn session,
+  // not just one capture: a follow-up window keeps it true until silence, a
+  // closing phrase, cancel, or reset ends it.
+  const voiceConversation = {
+    active: false,
+    previousTurn: 0,
+    lastGreetingAt: 0,
+    followUpTimer: null,
+    endReason: null,
+  };
+  const handledTurns = new WeakSet();
+
+  function clearFollowUpTimer() {
+    if (voiceConversation.followUpTimer !== null) {
+      clearTimeoutImpl(voiceConversation.followUpTimer);
+      voiceConversation.followUpTimer = null;
+    }
+  }
+
+  function beginVoiceConversation() {
+    clearFollowUpTimer();
+    voiceConversation.active = true;
+    voiceConversation.endReason = null;
+  }
+
+  function endVoiceConversation(reason = 'idle') {
+    clearFollowUpTimer();
+    voiceConversation.active = false;
+    voiceConversation.endReason = reason;
+  }
+
+  function resetVoiceConversation() {
+    endVoiceConversation('reset');
+    voiceConversation.previousTurn = 0;
+    voiceConversation.lastGreetingAt = 0;
+  }
+
+  /** Dynamic greeting: full intro on a fresh session, brief after that. */
+  function nextSummonGreeting() {
+    const greeting = nextGreeting({
+      previousTurn: voiceConversation.previousTurn,
+      lastAt: voiceConversation.lastGreetingAt,
+    });
+    voiceConversation.previousTurn = greeting.turn;
+    voiceConversation.lastGreetingAt = Date.now();
+    return greeting;
+  }
+
+  /** Bounded wait for the renderer's playback confirmation, then follow up. */
+  async function waitForReplyPlayback(out) {
+    const clip = out?.speech;
+    if (clip?.clipId && voiceService?.waitForPlayback) {
+      const hostAlive = getHostState?.()?.pidAlive === true;
+      await voiceService.waitForPlayback(clip.id, { timeoutMs: hostAlive ? 15_000 : 600 }).catch(() => {});
+      return;
+    }
+    await new Promise((resolve) => setTimeoutImpl(resolve, followUpGraceMs));
+  }
+
+  function scheduleFollowUp() {
+    if (!voiceConversation.active) return;
+    clearFollowUpTimer();
+    voiceConversation.followUpTimer = setTimeoutImpl(() => {
+      voiceConversation.followUpTimer = null;
+      if (!voiceConversation.active) return;
+      Promise.resolve(assistantService.startPtt({ durationMs: followUpListenMs }))
+        .catch((error) => {
+          if (error?.code === 'MIC_BUSY') return; // a manual turn already owns the mic
+          endVoiceConversation('follow-up-failed');
+        });
+    }, Math.max(25, followUpDelayMs));
+    voiceConversation.followUpTimer?.unref?.();
+  }
+
+  /**
+   * One policy decision after every finished spoken turn: silence or an
+   * explicit goodbye ends the session; anything else waits for the reply to
+   * finish playing, then reopens the mic without a second greeting.
+   */
+  async function handleAssistantTurn(out, meta = {}) {
+    if (!out || typeof out !== 'object') return;
+    if (handledTurns.has(out)) return; // route + service may both report one turn
+    handledTurns.add(out);
+    if (!voiceConversation.active) return;
+    const decision = conversationDecision({
+      transcript: out.transcript,
+      closing: out.conversationDone === true,
+    });
+    if (!decision.continue) {
+      endVoiceConversation(decision.reason);
+      return;
+    }
+    await waitForReplyPlayback(out);
+    if (!voiceConversation.active) return;
+    scheduleFollowUp();
+  }
 
   /**
    * Command reactions may speak a predefined line when spoken voice is
@@ -196,9 +299,6 @@ export function createSparkieeServer({
       && speech.provider === 'piper' && speech.style !== 'chirps';
   }
 
-  /** The line Sparky says when summoned with the shortcut. */
-  const SUMMON_GREETING = "Hey, I'm Sparky! What would you like me to do?";
-
   /**
    * Speak the summon greeting and wait (bounded) for the renderer to confirm
    * that playback finished. Waiting matters: the microphone opens only after
@@ -207,8 +307,9 @@ export function createSparkieeServer({
    */
   async function speakSummonGreeting() {
     if (!canSpeakAssistant()) return null;
+    const greeting = nextSummonGreeting();
     try {
-      const snapshot = await voiceService.speak(SUMMON_GREETING, { voiceEvent: 'greet', source: 'assistant' });
+      const snapshot = await voiceService.speak(greeting.text, { voiceEvent: 'greet', source: 'assistant' });
       const announced = snapshot?.speech ?? null;
       // Only a real clip can be played; a muted/failed announcement returns
       // immediately (the caption still shows) and must not block the mic.
@@ -404,6 +505,21 @@ export function createSparkieeServer({
   async function runTextCommand(text) {
     const intent = parseMusicIntent(text);
     if (!intent) {
+      // Explicit goodbyes are a local policy decision: never spent on a chat
+      // call, and never mistaken for the music "stop" command.
+      if (isClosingPhrase(text)) {
+        const reply = 'Okay, I will be here.';
+        const speechClip = await speakAssistantReply(reply);
+        recordAssistantAction({
+          kind: 'chat', text: String(text ?? ''), intent: 'conversation_end',
+          reply, executed: false,
+        });
+        return {
+          handled: true, intent: 'conversation_end', reply, executed: false,
+          conversationDone: true, speech: speechClip,
+          playback: musicService.playbackStatus ? musicService.playbackStatus() : null,
+        };
+      }
       // Not a music command: it is a conversational turn.
       return runChatTurn(text);
     }
@@ -561,6 +677,9 @@ export function createSparkieeServer({
       cancelTranscribe: () => sttService.cancel(),
       runText: runTextCommand,
     });
+  }
+  if (assistantService?.setTurnHandler) {
+    assistantService.setTurnHandler((out, meta) => handleAssistantTurn(out, meta));
   }
   const server = createServer(async (request, response) => {
     const host = request.socket.localAddress;
@@ -1170,6 +1289,11 @@ export function createSparkieeServer({
         assistant: {
           ...snap,
           conversation: chatStatus(),
+          voiceConversation: {
+            active: voiceConversation.active,
+            previousTurn: voiceConversation.previousTurn,
+            endReason: voiceConversation.endReason,
+          },
           shortcut: {
             ...(hotkey
               ? hotkey.snapshot().shortcut
@@ -1187,6 +1311,7 @@ export function createSparkieeServer({
         return;
       }
       const cleared = resetConversation();
+      resetVoiceConversation();
       sendJson(response, 200, { ok: true, cleared, conversation: chatStatus() });
       return;
     }
@@ -1210,6 +1335,7 @@ export function createSparkieeServer({
       }
       try {
         await assistantService.setListening(payload.enabled);
+        if (!payload.enabled) endVoiceConversation('listening-off');
       } catch (error) {
         if (error?.code === 'WAKE_NEEDS_SETUP') {
           sendJson(response, 400, { error: 'Wake word is not configured.', setup: error.setup });
@@ -1239,10 +1365,12 @@ export function createSparkieeServer({
         if (action === 'start') {
           // Greeting first, mic second: the microphone must never capture
           // Sparky's own hello.
+          beginVoiceConversation();
           await speakSummonGreeting();
           await assistantService.startPtt();
         } else if (action === 'stop') {
-          await assistantService.stopPtt();
+          const result = await assistantService.stopPtt();
+          void handleAssistantTurn(result, { reason: 'ptt-toggle-stop' });
         } else {
           sendJson(response, 200, { ok: true, action, assistant: await assistantService.status() });
           return;
@@ -1250,9 +1378,11 @@ export function createSparkieeServer({
         sendJson(response, 200, { ok: true, action, assistant: await assistantService.status() });
       } catch (error) {
         if (error?.code === 'MIC_BUSY') {
+          endVoiceConversation('ptt-busy');
           sendJson(response, 409, { error: 'The microphone is already in use.' });
           return;
         }
+        endVoiceConversation('ptt-start-failed');
         sendJson(response, 503, { error: error?.message ?? 'Microphone unavailable.' });
       }
       return;
@@ -1268,11 +1398,13 @@ export function createSparkieeServer({
       }
       try {
         // Same greeting-before-mic rule as the toggle path.
+        beginVoiceConversation();
         await speakSummonGreeting();
         const { sessionId, done } = await assistantService.startPtt();
         const snap = await assistantService.status();
         sendJson(response, 200, { ok: true, assistant: snap, sessionId });
       } catch (error) {
+        endVoiceConversation('ptt-start-failed');
         if (error?.code === 'MIC_BUSY') {
           sendJson(response, 409, { error: 'The microphone is already in use.' });
           return;
@@ -1291,6 +1423,7 @@ export function createSparkieeServer({
         return;
       }
       const result = await assistantService.stopPtt();
+      void handleAssistantTurn(result, { reason: 'ptt-stop' });
       const snap = await assistantService.status();
       // Legacy (no pipeline attached) results are the raw capture summary.
       const capture = result?.capture ?? null;
@@ -1304,6 +1437,7 @@ export function createSparkieeServer({
         intent: result?.intent ?? null,
         reply: result?.reply ?? null,
         speech: result?.speech ?? null,
+        conversationDone: result?.conversationDone === true,
       });
       return;
     }
@@ -1317,6 +1451,7 @@ export function createSparkieeServer({
         return;
       }
       const result = await assistantService.cancelPtt();
+      endVoiceConversation('cancelled');
       const snap = await assistantService.status();
       sendJson(response, 200, { ok: true, assistant: snap, capture: result?.capture ?? null, cancelled: true });
       return;
