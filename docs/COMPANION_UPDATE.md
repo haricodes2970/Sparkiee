@@ -66,8 +66,19 @@ names case-insensitively. Paths must be existing absolute directories.
 - Unknown projects and unsafe commands are answered locally and never sent to
   the chat provider.
 
+## Optional `.env`
+
+`sparkiee` loads a package-root `.env` (or `SPARKIEE_ENV_FILE`) before
+dispatch. It only fills variables that are not already set, skips test runs,
+never logs values, and warns without echoing contents if a line is malformed.
+Keep the file at mode `0600`; `.env` is gitignored. Use
+`SPARKIEE_DISABLE_DOTENV=1` to opt out. `.env.example` documents the accepted
+keys.
+
 ## Environment
 
 - `SPARKIEE_PROJECTS_FILE` — override the project registry path.
+- `SPARKIEE_ENV_FILE` — choose a different `.env` file.
+- `SPARKIEE_DISABLE_DOTENV=1` — disable `.env` loading.
 - `TERMINAL` — preferred terminal binary; otherwise Sparkiee tries Ptyxis,
   GNOME Terminal, KGX, Konsole, x-terminal-emulator, and xterm.

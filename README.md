@@ -117,6 +117,21 @@ sparkiee --version
 
 The Electron dependency downloads a platform-specific desktop runtime during npm install. On Linux the pet host is launched with `--ozone-platform=x11` (XWayland) because GNOME/Mutter refuses window positioning for native Wayland clients. This initial implementation has not been published to npm; npm link exposes the local checkout as the sparkiee command.
 
+## Optional `.env` keys
+
+Copy `.env.example` to `.env`, fill only what you need, and keep it owner-only:
+
+~~~bash
+cp .env.example .env
+chmod 600 .env
+~~~
+
+The CLI and a directly launched daemon load `.env` without overriding values
+already present in the environment. Test runs skip it, values are never
+printed, and `.env` stays gitignored. Prefer `sparkiee assistant setup` for a
+hidden key prompt if you do not want a file at all. `SPARKIEE_DISABLE_DOTENV=1`
+turns the loader off.
+
 ## Useful environment variables
 
 - SPARKIEE_PORT: local HTTP port (default 2005).
@@ -131,6 +146,8 @@ The Electron dependency downloads a platform-specific desktop runtime during npm
 - SPARKIEE_CHAT_LOCAL_ONLY=1: block all outbound chat requests.
 - SPARKIEE_MUSIC_ROOTS: colon-separated music directories to scan (default `~/Music`).
 - SPARKIEE_PROJECTS_FILE: override the project registry path.
+- SPARKIEE_ENV_FILE: choose a `.env` file other than the package-root one.
+- SPARKIEE_DISABLE_DOTENV=1: disable `.env` loading.
 - TERMINAL: preferred terminal binary for local project commands.
 
 ## Security principles

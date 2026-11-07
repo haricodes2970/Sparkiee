@@ -24,7 +24,15 @@ import { createHotkeyState } from '../../core/src/voice-hotkey.mjs';
 import { createSparkieeServer } from './server.mjs';
 import { createMusicLibrary } from '../../core/src/music-library.mjs';
 import { createMusicPlayer } from '../../core/src/music-player.mjs';
+import { applyDotEnv } from '../../core/src/dotenv.mjs';
 import { CHARACTER_ROOTS, createPackDetailProvider } from './pack-detail.mjs';
+
+// Direct daemon launches get the same optional .env support as the CLI; when
+// spawned by the CLI the values are already inherited and are never overridden.
+await applyDotEnv({
+  file: process.env.SPARKIEE_ENV_FILE || fileURLToPath(new URL('../../../.env', import.meta.url)),
+  skipInTests: true,
+}).catch(() => {});
 
 const paths = resolveRuntimePaths();
 const projectRegistry = createProjectRegistry({ env: process.env });
