@@ -17,6 +17,7 @@ import {
 
 const GROQ_KEY = 'gsk_abcdefghijklmnopqrstuvwxyz0123456789';
 const GOOGLE_KEY = 'AIzaSyA1234567890abcdefghijklmnopqrstuv';
+const GOOGLE_AQ_KEY = 'AQ.Ab8RN6LioS7k0I1x2y3z4a5b6c7d8e9f0g1h2i3j4k5l6m7n8o9p';
 
 async function tempEnv() {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'sparkiee-chat-'));
@@ -31,6 +32,7 @@ test('chat config supports exactly Groq and Google AI Studio, Groq is the defaul
 test('provider key shapes are validated per provider (and no obvious secret is accepted as a model)', () => {
   assert.equal(isValidChatApiKey('groq', GROQ_KEY), true);
   assert.equal(isValidChatApiKey('google', GOOGLE_KEY), true);
+  assert.equal(isValidChatApiKey('google', GOOGLE_AQ_KEY), true);
   assert.equal(isValidChatApiKey('groq', 'short'), false);
   assert.equal(isValidChatApiKey('google', 'not-a-google-key'), false);
   assert.equal(isValidChatApiKey('unknown', GROQ_KEY), false);

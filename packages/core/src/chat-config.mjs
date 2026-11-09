@@ -26,19 +26,23 @@ export const CHAT_PROVIDER_INFO = Object.freeze({
     label: 'Groq',
     baseUrl: 'https://api.groq.com/openai/v1',
     envKeys: Object.freeze(['GROQ_API_KEY']),
-    modelHint: 'llama-3.3-70b-versatile',
+    modelHint: 'openai/gpt-oss-20b',
   }),
   google: Object.freeze({
     id: 'google',
     label: 'Google AI Studio',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
     envKeys: Object.freeze(['GOOGLE_AI_API_KEY', 'GEMINI_API_KEY']),
-    modelHint: 'gemini-2.5-flash',
+    modelHint: 'gemini-3.6-flash',
   }),
 });
 
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{1,127}$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]+$/;
+// Google AI Studio issues both legacy `AIza…` keys and newer `AQ.…` keys.
+// The latter contain a dot, so they need a wider shape check. The provider is
+// still the authority: setup verifies the key against the live model list.
+const GOOGLE_TOKEN_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 export function resolveChatConfigDir(env = process.env) {
   return resolveVoiceConfigDir(env);
@@ -58,7 +62,8 @@ export function isValidChatApiKey(provider, key) {
     return trimmed.length >= 40 && trimmed.length <= 256 && TOKEN_PATTERN.test(trimmed);
   }
   if (/^AIza[0-9A-Za-z_-]{30,220}$/.test(trimmed)) return true;
-  return trimmed.length >= 35 && trimmed.length <= 256 && TOKEN_PATTERN.test(trimmed);
+  if (/^AQ\.[A-Za-z0-9._-]{20,250}$/.test(trimmed)) return true;
+  return trimmed.length >= 35 && trimmed.length <= 256 && GOOGLE_TOKEN_PATTERN.test(trimmed);
 }
 
 export function isValidChatModel(model) {
