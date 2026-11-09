@@ -5,7 +5,7 @@ import { access, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isAuthorized, toRuntimePayload, DEFAULT_HOST } from '../../core/src/index.mjs';
+import { APP_NAME, APP_VERSION, isAuthorized, toRuntimePayload, DEFAULT_HOST } from '../../core/src/index.mjs';
 import { createPetController, isValidDockPayload, isValidPetCommandPayload, isValidPetSettingsPayload, isValidPresentationClaimPayload, isValidPresentationReleasePayload } from '../../core/src/pet-state.mjs';
 import { AGENT_EVENT_REACTIONS, COMMAND_SPEECH_EVENTS, isValidVoiceEvent, pickLine, SPEECH_EVENT_COOLDOWN_MS } from '../../core/src/voice-lines.mjs';
 import { AGENT_EVENT_COOLDOWN_MS, AGENT_EVENT_DEDUP_MS, AGENT_EVENT_MEMORY_LIMIT, isValidAgentEventPayload } from '../../core/src/agent-events.mjs';
@@ -777,7 +777,7 @@ export function createSparkieeServer({
     }
 
     if (method === 'GET' && pathname === '/health') {
-      sendJson(response, 200, { ok: true, name: 'Sparkiee', version: '0.1.0' });
+      sendJson(response, 200, { ok: true, name: APP_NAME, version: APP_VERSION });
       return;
     }
     if (method === 'GET' && pathname === '/api/v1/runtime') {

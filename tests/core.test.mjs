@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  APP_VERSION,
   DEFAULT_PORT,
   ensureAuthToken,
   isAuthorized,
@@ -12,6 +13,11 @@ import {
   resolvePort,
   resolveRuntimePaths,
 } from '../packages/core/src/index.mjs';
+
+test('core version matches the root package version', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(APP_VERSION, manifest.version);
+});
 
 test('default port and paths are predictable', () => {
   assert.equal(resolvePort({}), DEFAULT_PORT);

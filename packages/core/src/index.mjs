@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 export const APP_NAME = 'Sparkiee';
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '1.1.0';
 export const DEFAULT_HOST = '127.0.0.1';
 export const DEFAULT_PORT = 2005;
 export const PROTOCOL_VERSION = 1;

@@ -6,6 +6,7 @@ import { createServer as createNetServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { APP_VERSION } from '../../packages/core/src/index.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const CLI = path.join(ROOT, 'bin/sparkiee.mjs');
@@ -52,7 +53,7 @@ test('CLI help and version work without starting the daemon', async () => {
 
   const version = await runCli(['--version'], process.env);
   assert.equal(version.code, 0, version.stderr);
-  assert.match(version.stdout.trim(), /^0\.1\.0$/);
+  assert.equal(version.stdout.trim(), APP_VERSION);
 });
 
 test('CLI starts the daemon, serves the dashboard, reports status, and stops cleanly', async () => {

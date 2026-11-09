@@ -1,6 +1,37 @@
 # Project Status
 
-Updated: 2026-11-06
+Updated: 2026-11-10
+
+## v1.1.0 “Companion Update” (2026-11-10)
+
+- [x] **Adaptive greetings**: first summon gets the full greeting, later
+      summons get a short acknowledgement, and a 30-minute gap starts a fresh
+      session.
+- [x] **Continuous voice conversation**: the microphone reopens for a bounded
+      follow-up window after each answer; a silent capture ends the session
+      without inventing a transcript.
+- [x] **Local closing phrases**: “that’s all”, “thanks”, “bye”, and “never
+      mind” end the loop locally without a chat request. A bare “stop” still
+      controls music because music intents are parsed first.
+- [x] **Audio ducking**: music stays lowered for the whole live microphone
+      window and is restored when the session ends, is cancelled, or is reset.
+- [x] **Local project control**: owner-only `projects.json` registry, a
+      deterministic command parser, and a terminal launcher for forms such as
+      “open project DJ in the console and give command open code”.
+- [x] **Execution boundary**: chat text is never executed; only the project
+      parser can spawn a terminal, commands are limited to developer binaries,
+      shell metacharacters are rejected, and daemon-only API keys are removed
+      from child environments.
+- [x] **Optional `.env`**: package-root loading that only fills missing
+      variables, skips test runs, never logs values, and can be disabled with
+      `SPARKIEE_DISABLE_DOTENV=1`.
+- [x] **Versioning**: `APP_VERSION` is the single runtime source, package
+      manifests and both lockfiles are aligned at `1.1.0`, health and runtime
+      routes report it, and the release checklist lives in
+      [docs/VERSIONING.md](docs/VERSIONING.md).
+- [x] 436 automated tests pass (`npm run check` + `npm test`, 2026-11-10),
+      including conversation policy, ducking, project parsing and routing,
+      dotenv safety, version consistency, and CLI lifecycle integration.
 
 ## Completed
 

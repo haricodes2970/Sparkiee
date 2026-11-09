@@ -74,7 +74,8 @@ sparkiee pet status
 ~~~
 
 See [the companion update notes](docs/COMPANION_UPDATE.md) for the
-conversation loop, ducking, project safety rules, and spoken phrases.
+conversation loop, ducking, project safety rules, and spoken phrases, and
+[the versioning policy](docs/VERSIONING.md) for the release checklist.
 
 To add your own pack, create `~/.local/share/sparkiee/characters/<id>/`
 with a `manifest.json` (schema validated by

@@ -43,7 +43,7 @@ test('health and runtime routes return minimal status data', async () => {
   try {
     const healthResponse = await fetch(`http://127.0.0.1:${instance.port}/health`);
     assert.equal(healthResponse.status, 200);
-    assert.deepEqual(await healthResponse.json(), { ok: true, name: 'Sparkiee', version: '0.1.0' });
+    assert.deepEqual(await healthResponse.json(), { ok: true, name: 'Sparkiee', version: '1.1.0' });
 
     const runtimeResponse = await fetch(`http://127.0.0.1:${instance.port}/api/v1/runtime`);
     const runtime = await runtimeResponse.json();
