@@ -2,6 +2,18 @@
 
 Updated: 2026-11-10
 
+## v1.1.1 “Companion Update” patch (2026-11-10)
+
+- [x] **Live chat repaired**: the daemon now passes the message list to the
+      provider client in the shape it expects, so real Groq and Google turns
+      return text instead of `bad_response`.
+- [x] **Current provider setup**: Google `AQ.`-prefixed API keys are accepted,
+      Groq defaults to `openai/gpt-oss-20b`, and Google defaults to
+      `gemini-3.6-flash` instead of retired models.
+- [x] **Live verification**: one real Groq turn and one real Google turn both
+      returned text through the daemon and requested speech playback.
+- [x] 438 automated tests pass (`npm run check` + `npm test`, 2026-11-10).
+
 ## v1.1.0 “Companion Update” (2026-11-10)
 
 - [x] **Adaptive greetings**: first summon gets the full greeting, later
