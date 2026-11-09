@@ -13,8 +13,8 @@ import { loadVoiceConfig, resolveVoiceCacheDir, DEFAULT_VOICES, DEFAULT_SPEED } 
 import { createAudioCache } from '../../core/src/audio-cache.mjs';
 import { createLocalTts, probeLocalTts } from '../../core/src/local-tts.mjs';
 import { createPiperTts } from '../../core/src/piper-tts.mjs';
-import { loadChatConfig, describeChatConfig, CHAT_PROVIDER_INFO } from '../../core/src/chat-config.mjs';
-import { createChatClient } from '../../core/src/chat-client.mjs';
+import { loadChatConfig } from '../../core/src/chat-config.mjs';
+import { createChatProvider } from './chat-provider.mjs';
 import { withoutSecrets } from '../../core/src/env-safety.mjs';
 import { createProjectRegistry } from '../../core/src/project-registry.mjs';
 import { createSystemLauncher } from '../../core/src/system-launcher.mjs';
@@ -184,38 +184,6 @@ async function refreshChatConfig({ force = false } = {}) {
 
 function getChatConfig() {
   return chatConfigLoaded ?? DEFAULT_CHAT_UNCONFIGURED;
-}
-
-/**
- * Replaceable adapter around the chat client: the server only ever sees this
- * small surface, so the provider can change without touching routing logic.
- * `configured()` is false in local-only mode, which makes the honest
- * "local-only" reply path do the work instead of a silent egress.
- */
-function createChatProvider() {
-  return {
-    configured() {
-      const loaded = getChatConfig();
-      return loaded.configured === true && loaded.config.localOnly !== true;
-    },
-    describe() {
-      return describeChatConfig(getChatConfig());
-    },
-    chat(messages, options) {
-      const loaded = getChatConfig();
-      const active = loaded.provider;
-      const entry = loaded.config.providers?.[active] ?? {};
-      return createChatClient({
-        provider: active,
-        config: {
-          apiKey: entry.apiKey ?? null,
-          model: entry.model ?? null,
-          baseUrl: CHAT_PROVIDER_INFO[active].baseUrl,
-          localOnly: loaded.config.localOnly === true,
-        },
-      }).chat(messages, options);
-    },
-  };
 }
 
 /**
@@ -525,7 +493,7 @@ async function main() {
     assistantService,
     projectRegistry,
     systemLauncher,
-    chatProvider: createChatProvider(),
+    chatProvider: createChatProvider({ getChatConfig }),
     refreshChatConfig: () => refreshChatConfig(),
     hotkey,
     refreshVoiceConfig: () => refreshVoiceConfig(),
