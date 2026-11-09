@@ -14,3 +14,6 @@ voice.json
 *.secret.json
 secrets/
 sparkiee-voice*.json
+
+# AgentBridge handoff files stay local
+.AgentBridge/
